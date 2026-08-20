@@ -1,8 +1,19 @@
 # Ratatoskr ChatGPT
 
-`ratatoskr-chatgpt` is the ChatGPT archive bounded context for Ratatoskr Next. It preserves official ChatGPT data exports as immutable evidence, normalizes projects and conversation graphs, archives referenced assets, and publishes searchable local projections without depending on a live ChatGPT browser session.
+`ratatoskr-chatgpt` is the ChatGPT archive bounded context for Ratatoskr. It preserves official ChatGPT data exports as immutable evidence, normalizes projects and conversation graphs, archives referenced assets, and publishes searchable local projections without depending on a live ChatGPT browser session.
 
 > **Status:** architecture bootstrap. Export importers, data models, Compliance adapters, persistence, and portable exports described below are planned and are not implemented yet.
+
+> [!IMPORTANT]
+> **Ratatoskr is in development.** No database holds data that has to survive a schema change.
+> While this status holds, these two rules replace what the documents below plan:
+>
+> - the API and the database keep their first version. There is no `v2` and no later major
+>   version.
+> - the database has no migrations. One schema definition exists, and a schema change edits it in
+>   place.
+>
+> Only the repository owner changes this status.
 
 ## Product boundary
 
