@@ -10,9 +10,9 @@ Required tests:
 - Conversation graph, revisions, project/source/asset reconciliation.
 - Completeness counts/status/warnings and missing-data-not-deletion semantics.
 - Portable export deterministic manifest and safe paths.
-- Privacy deletion, authorization, migrations, outbox/inbox replay, redacted telemetry.
+- Privacy deletion, authorization, schema initialization, outbox/inbox replay, redacted telemetry.
 - Optional Compliance cursor/redelivery/auth tests with fakes.
-- Workspace export-agent -> ChatGPT -> Knowledge flow.
+- Planned workspace Export Agent -> ChatGPT -> Knowledge flow.
 
 Real personal exports are never committed; sanitized fixtures require explicit review.
 

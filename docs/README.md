@@ -4,7 +4,7 @@
 - `REQUIREMENTS.md` — archive and reconstruction requirements.
 - `DOMAIN.md` — exports, projects, conversations, messages, revisions, parts, and assets.
 - `INTERFACES.md` — upload/import/events, BlobStore, Knowledge, and portable export boundaries.
-- `DATA_MODEL.md` — `chatgpt_archive` schema.
+- `DATA_MODEL.md` — planned `chatgpt_archive` schema.
 - `THREAT_MODEL.md` — archive, parser, privacy, content, and Compliance risks.
 - `TESTING.md` — fixtures, parser, graph, completeness, and security tests.
 - `IMPLEMENTATION_PLAN.md` — ordered archive vertical slices.

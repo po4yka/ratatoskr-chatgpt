@@ -11,4 +11,4 @@
 9. Add privacy deletion, reparse, parser-version migration, and real owner-provided fixture discovery process.
 10. Add optional Compliance adapter as a separate acquisition mode.
 
-Definition of Done: raw evidence survives failures, parser is safe/versioned/loss-aware, graph and completeness validate, portable export works, privacy/migrations/events/tests and workspace flow pass.
+Definition of Done: raw evidence survives failures, parser is safe/versioned/loss-aware, graph and completeness validate, portable export works, privacy/schema/events/tests and the planned workspace flow pass.

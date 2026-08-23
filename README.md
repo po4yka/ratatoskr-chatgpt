@@ -10,8 +10,8 @@
 >
 > - the API and the database keep their first version. There is no `v2` and no later major
 >   version.
-> - the database has no migrations. One schema definition exists, and a schema change edits it in
->   place.
+> - the database has no migrations. No schema exists yet. The first persistence change creates one
+>   schema definition, and later schema changes edit it in place.
 >
 > Only the repository owner changes this status.
 
@@ -84,7 +84,7 @@ Normalization never replaces the provider evidence. Parser upgrades can replay o
 
 ## Planned data model
 
-The service owns a `chatgpt_archive.*` PostgreSQL schema:
+The service will own a `chatgpt_archive.*` PostgreSQL schema when persistence is implemented:
 
 ```text
 chatgpt_accounts
@@ -391,7 +391,7 @@ Every import records archive hash, acquisition method, detected schema, parser v
 
 ## Workspace integration
 
-`ratatoskr-workspace` pins this repository with compatible AI-archive contracts, Export Agent, Platform, Knowledge, Web, and Mobile commits. Real user exports used as fixtures must be sanitized or kept in protected test storage; public CI uses synthetic archives.
+Planned: `ratatoskr-workspace` will pin this repository with compatible AI-archive contracts, Export Agent, Platform, Knowledge, Web, and Mobile commits. No workspace pin or integration profile exists for this service today. Real user exports used as fixtures must be sanitized or kept in protected test storage; public CI will use synthetic archives.
 
 ## Project status
 

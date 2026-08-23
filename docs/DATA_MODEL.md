@@ -1,6 +1,6 @@
 # ChatGPT archive data model
 
-## Owned schema: `chatgpt_archive.*`
+## Planned owned schema: `chatgpt_archive.*`
 
 - `accounts`, acquisition connections and optional encrypted Compliance credentials.
 - `exports`: archive hash/blob, acquisition, received/imported time, detected schema, parser, completeness.

@@ -72,7 +72,7 @@ ratatoskr-chatgpt/
 │   └── test-support/
 ├── services/
 │   └── chatgpt/
-├── migrations/
+├── schema/
 ├── fixtures/
 │   ├── synthetic-exports/
 │   └── malformed-archives/
@@ -707,7 +707,7 @@ Metrics contain counts and sizes, not titles, message text, file names, or provi
 
 ### Integration
 
-- SQLx migrations and reconciliation transactions;
+- SQL schema initialization and reconciliation transactions;
 - BlobStore raw archive/assets;
 - interrupted/resumed import;
 - outbox/inbox replay;
@@ -729,7 +729,7 @@ Metrics contain counts and sizes, not titles, message text, file names, or provi
 
 Only synthetic or explicitly sanitized private fixtures are used. Real personal exports remain outside Git and are referenced through secure local test configuration.
 
-### Workspace end-to-end
+### Planned workspace end-to-end
 
 - Export Agent upload and operation progress;
 - raw-first import and completeness report;

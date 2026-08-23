@@ -35,7 +35,7 @@ The service must:
 
 ## Current phase
 
-The repository is in architecture bootstrap. Do not assume Rust crates, parsers, migrations, Compliance connectors, fixtures, or CI commands exist unless they are present in the checkout.
+The repository is in architecture bootstrap. Do not assume Rust crates, parsers, a database schema, Compliance connectors, fixtures, or CI commands exist unless they are present in the checkout.
 
 When creating initial implementation:
 
@@ -478,7 +478,7 @@ Publish stable archive events/references containing:
 
 `ratatoskr-knowledge` owns summaries, embeddings, decisions, entities, and semantic search. Knowledge results never replace archive evidence.
 
-## Persistence and migrations
+## Persistence and schema evolution
 
 ChatGPT Archive writes only its owned schema.
 
@@ -506,7 +506,7 @@ Rules:
 - no cross-schema writes or foreign keys;
 - raw provider records remain separable from normalized projections;
 - stable provider IDs and snapshot/revision uniqueness are constrained;
-- migrations preserve raw links, graph relationships, and completeness history;
+- schema changes preserve raw links, graph relationships, and completeness history;
 - destructive cleanup cannot remove the only source evidence for normalized state;
 - large bytes use protected BlobStore references.
 
@@ -589,7 +589,7 @@ When implementation exists, include applicable tests for:
 - absence-without-deletion and explicit tombstones;
 - compliance cursor/deduplication/retention-window behavior;
 - portable export determinism and manifest correctness;
-- outbox/inbox replay and migrations.
+- outbox/inbox replay and schema initialization.
 
 Use synthetic or heavily minimized/redacted fixtures. Never commit personal ChatGPT exports or real private conversations to a public repository.
 
@@ -603,7 +603,7 @@ Use a workspace changeset when changing:
 - BlobStore/asset references;
 - completeness/status semantics shown by clients;
 - Compliance authentication/deployment;
-- migration/backfill/portable export formats.
+- backfill and portable export formats.
 
 List producer/consumer compatibility, rollout, rollback, reprocessing/reindexing, storage, privacy, and user-visible completeness impact.
 
@@ -632,4 +632,4 @@ A task is complete only when:
 - no browser-session automation or inference responsibility is introduced;
 - portable output and downstream events preserve provenance;
 - relevant security/import/graph/export tests pass;
-- contracts, migrations, telemetry, privacy, and cross-repository rollout are documented.
+- contracts, schema, telemetry, privacy, and cross-repository rollout are documented.
