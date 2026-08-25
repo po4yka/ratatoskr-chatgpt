@@ -17,8 +17,8 @@ There is no code here yet, so no limit is enforced yet. The commit that brings t
 
 ## Current validation
 
-This repository has no product manifest or `.github/workflows/ci.yml` yet. Run the current docs-only
-gate locally:
+The docs-only OpenSpec checks and the Rust product gate both run. The full local
+equivalent of CI is:
 
 ```bash
 git diff --check
@@ -26,11 +26,24 @@ openspec validate --all --strict
 openspec validate --archived
 ```
 
-`.github/workflows/openspec.yml` runs the two OpenSpec commands in CI. The first-manifest rule in
-`.github/workflows/fleet.yml` requires the first product manifest to add a product `ci.yml` that
-invokes a test. For a Rust or Node manifest, it also requires `clippy.toml` or
-`eslint.config.js`, respectively; it does not prove that product CI invokes the linter. The
-docs-only/OpenSpec gate remains in addition to product CI.
+`.github/workflows/openspec.yml` runs the two OpenSpec commands in CI. The product gate lives in
+`.github/workflows/ci.yml` beside them; it needs a PostgreSQL for the schema integration tests.
+
+### Rust — also the CI gate
+
+```bash
+cargo fetch --locked
+cargo deny check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+```
+
+This list and the `- run: cargo` lines in `ci.yml`'s `gate` job are enforced identical by that
+workflow's last step. `CHATGPT_TEST_DATABASE_URL` must point at a PostgreSQL 17 for
+`crates/chatgpt-archive/tests/persistence_schema.rs`; without it those tests skip locally, while CI
+always sets it from its service container.
 
 ## Workflow
 

@@ -1,0 +1,45 @@
+[package]
+name = "ratatoskr-chatgpt-archive"
+description = "Domain library for the Ratatoskr ChatGPT bounded context."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytes.workspace = true
+axum.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+http.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+ratatoskr-error-contracts.workspace = true
+ratatoskr-identifiers.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[features]
+test-support = []
+
+[dev-dependencies]
+sqlx.workspace = true
+http-body-util.workspace = true
+ratatoskr-chatgpt-archive = { path = ".", features = ["test-support"] }
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

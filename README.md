@@ -2,7 +2,7 @@
 
 `ratatoskr-chatgpt` is the ChatGPT archive bounded context for Ratatoskr. It preserves official ChatGPT data exports as immutable evidence, normalizes projects and conversation graphs, archives referenced assets, and publishes searchable local projections without depending on a live ChatGPT browser session.
 
-> **Status:** architecture bootstrap. Export importers, data models, Compliance adapters, persistence, and portable exports described below are planned and are not implemented yet.
+> **Status:** service scaffold implemented. The Rust workspace builds a `ratatoskr-chatgpt-archive` binary that boots with typed configuration, structured JSON telemetry, `/health/live` + `/health/ready` + `/metrics` + `/version` endpoints, content-addressed BlobStore storage, and applies the first-version `chatgpt_archive` schema (`schema.sql`). Not implemented yet: export receipt and safe extraction, parsers, import runs, graph reconciliation, events, portable exports, Compliance adapters — everything from implementation plan item 2 on.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -10,10 +10,23 @@
 >
 > - the API and the database keep their first version. There is no `v2` and no later major
 >   version.
-> - the database has no migrations. No schema exists yet. The first persistence change creates one
->   schema definition, and later schema changes edit it in place.
+> - the database has no migrations. The first-version definition lives in `schema.sql`, is
+>   embedded into the binary, and later schema changes edit that file in place.
 >
 > Only the repository owner changes this status.
+
+## Running locally
+
+```bash
+docker compose up -d postgres          # PostgreSQL 17 on 127.0.0.1:5439
+export RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9084
+export RATATOSKR__STORAGE__BLOB_ROOT=/tmp/ratatoskr-chatgpt/blobs
+export RATATOSKR__STORAGE__DATABASE_URL=postgres://chatgpt:chatgpt@127.0.0.1:5439/chatgpt
+cargo run -p ratatoskr-chatgpt-archive-service
+curl http://127.0.0.1:9084/health/ready
+```
+
+The validation commands are in `DEVELOPMENT.md`; CI enforces the same list.
 
 ## Product boundary
 
@@ -395,4 +408,4 @@ Planned: `ratatoskr-workspace` will pin this repository with compatible AI-archi
 
 ## Project status
 
-This README defines the intended ChatGPT archive architecture. No importer, schema parser, Compliance connector, database model, or portable export generator exists yet.
+This README defines the intended ChatGPT archive architecture. The service scaffold (configuration, telemetry, health endpoints, errors, BlobStore, first-version schema) is implemented and tested; no importer, schema parser, Compliance connector, or portable export generator exists yet.

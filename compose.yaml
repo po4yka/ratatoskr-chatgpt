@@ -1,0 +1,22 @@
+services:
+  postgres:
+    # Pinned by digest, not by tag, matching ci.yml. The digest is `postgres:17` as it stood on
+    # 2026-08-19: PostgreSQL 17.11, the multi-architecture index.
+    image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+    container_name: ratatoskr-chatgpt-postgres
+    environment:
+      POSTGRES_USER: chatgpt
+      POSTGRES_PASSWORD: chatgpt
+      POSTGRES_DB: chatgpt
+      # Byte-identical to the CI service container and to the `create database` statement in the
+      # test harness. Without it this cluster is created with the host's glibc collation while CI
+      # creates ICU, so a text index sorts differently in the two places that are supposed to be
+      # checking each other.
+      POSTGRES_INITDB_ARGS: "--locale-provider=icu --icu-locale=und-x-icu --encoding=UTF8"
+    ports:
+      - "127.0.0.1:5439:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatgpt -d chatgpt && psql -U chatgpt -d chatgpt -c 'select 1' > /dev/null"]
+      interval: 1s
+      timeout: 5s
+      retries: 30

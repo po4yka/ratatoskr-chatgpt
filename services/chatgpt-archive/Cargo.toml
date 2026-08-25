@@ -1,0 +1,37 @@
+[package]
+name = "ratatoskr-chatgpt-archive-service"
+description = "Ratatoskr ChatGPT Archive service process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ratatoskr_chatgpt_archive_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ratatoskr-chatgpt-archive"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive" }
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive", features = ["test-support"] }
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
