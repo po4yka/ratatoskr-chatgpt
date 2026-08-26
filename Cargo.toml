@@ -58,6 +58,7 @@ hex  = "=0.4.3"
 # `v7` because ratatoskr-contracts mints UUIDv7 for internally minted identity, and the database
 # stores the same bytes; schema.sql deliberately carries no id DEFAULT that could produce v4.
 uuid = { version = "=1.24.1", features = ["v7"] }
+zip  = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 
 # ---- serialization and errors ----
 serde      = { version = "=1.0.229", features = ["derive"] }

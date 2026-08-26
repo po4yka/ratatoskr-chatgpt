@@ -39,6 +39,10 @@ async fn connected(
         database_acquire_timeout_ms: 5_000,
         shutdown_timeout_ms: 5_000,
         max_archive_bytes: 17_179_869_184,
+        max_archive_entries: 10_000,
+        max_archive_entry_bytes: 2_147_483_648,
+        max_archive_decompressed_bytes: 34_359_738_368,
+        max_archive_compression_ratio: 100,
     };
     let database =
         ratatoskr_chatgpt_archive::persistence::Database::connect(&storage, &limits).await?;

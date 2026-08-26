@@ -56,6 +56,42 @@ fn max_archive_bytes_parses_with_documented_default() {
     assert_eq!(config.limits.max_archive_bytes, 1024);
 }
 
+#[test]
+fn extraction_caps_are_accepted_as_positive_configuration() {
+    let loaded = Config::from_environment(entries(&[
+        ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES", "17"),
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRY_BYTES", "1024"),
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_DECOMPRESSED_BYTES", "4096"),
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_COMPRESSION_RATIO", "12"),
+    ]));
+
+    assert!(loaded.is_ok(), "positive extraction caps must be accepted");
+}
+
+#[test]
+fn non_positive_extraction_caps_are_value_free() {
+    for key in [
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES",
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRY_BYTES",
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_DECOMPRESSED_BYTES",
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_COMPRESSION_RATIO",
+    ] {
+        let loaded = Config::from_environment(entries(&[
+            ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+            (key, "0"),
+        ]));
+        let error = loaded.expect_err("zero extraction cap must fail");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == key)
+        );
+        assert!(!format!("{error}").contains('0'));
+    }
+}
+
 /// A cap that is zero, negative, or not a number refuses startup, naming the
 /// key and the rule but never the supplied bytes.
 #[test]

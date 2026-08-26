@@ -113,6 +113,14 @@ pub struct Limits {
     pub shutdown_timeout_ms: u64,
     /// Maximum accepted archive size in bytes.
     pub max_archive_bytes: u64,
+    /// Maximum central-directory entries in one archive.
+    pub max_archive_entries: u32,
+    /// Maximum decompressed bytes in a single archive entry.
+    pub max_archive_entry_bytes: u64,
+    /// Maximum aggregate decompressed bytes in one archive.
+    pub max_archive_decompressed_bytes: u64,
+    /// Maximum permitted per-entry decompression ratio.
+    pub max_archive_compression_ratio: u64,
 }
 
 /// One configuration violation. The offending key and the rule it broke, and
@@ -226,9 +234,18 @@ const KEY_DATABASE_CONNECTIONS: &str = "RATATOSKR__LIMITS__DATABASE_CONNECTIONS"
 const KEY_DATABASE_ACQUIRE_TIMEOUT_MS: &str = "RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS";
 const KEY_SHUTDOWN_TIMEOUT_MS: &str = "RATATOSKR__LIMITS__SHUTDOWN_TIMEOUT_MS";
 const KEY_MAX_ARCHIVE_BYTES: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES";
+const KEY_MAX_ARCHIVE_ENTRIES: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES";
+const KEY_MAX_ARCHIVE_ENTRY_BYTES: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRY_BYTES";
+const KEY_MAX_ARCHIVE_DECOMPRESSED_BYTES: &str =
+    "RATATOSKR__LIMITS__MAX_ARCHIVE_DECOMPRESSED_BYTES";
+const KEY_MAX_ARCHIVE_COMPRESSION_RATIO: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_COMPRESSION_RATIO";
 const KEY_RECEIPT_STAGING_ROOT: &str = "RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT";
 const KEY_TENANT_TOKENS: &str = "RATATOSKR__RECEIPT__TENANT_TOKENS";
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed-key dispatch keeps validation in one exhaustive match"
+)]
 fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec<Violation>) {
     let refused = |rule: &'static str| Violation {
         key: key.to_owned(),
@@ -277,6 +294,22 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
         }
         KEY_MAX_ARCHIVE_BYTES => match parse_positive::<u64>(value) {
             Ok(parsed) => config.limits.max_archive_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        KEY_MAX_ARCHIVE_ENTRIES => match parse_positive::<u32>(value) {
+            Ok(parsed) => config.limits.max_archive_entries = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        KEY_MAX_ARCHIVE_ENTRY_BYTES => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_archive_entry_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        KEY_MAX_ARCHIVE_DECOMPRESSED_BYTES => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_archive_decompressed_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        KEY_MAX_ARCHIVE_COMPRESSION_RATIO => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_archive_compression_ratio = parsed,
             Err(rule) => violations.push(refused(rule)),
         },
         KEY_RECEIPT_STAGING_ROOT => match parse_absolute_path(value) {
@@ -370,6 +403,10 @@ impl Default for Config {
                 // Generous default for full account exports with assets:
                 // 16 GiB, overridable per deployment through limits.
                 max_archive_bytes: 17_179_869_184,
+                max_archive_entries: 10_000,
+                max_archive_entry_bytes: 2_147_483_648,
+                max_archive_decompressed_bytes: 34_359_738_368,
+                max_archive_compression_ratio: 100,
             },
         }
     }
