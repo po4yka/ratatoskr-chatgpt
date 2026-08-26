@@ -111,6 +111,8 @@ pub enum Subsystem {
     Http,
     /// The database pool, the schema, or a query.
     Persistence,
+    /// Archive receipt: staging, hashing, or durable import records.
+    Receipt,
 }
 
 impl core::fmt::Display for Subsystem {
@@ -120,6 +122,7 @@ impl core::fmt::Display for Subsystem {
             Self::Telemetry => "telemetry",
             Self::Http => "http",
             Self::Persistence => "persistence",
+            Self::Receipt => "receipt",
         })
     }
 }
@@ -150,15 +153,18 @@ pub enum FailureKind {
     NotFound,
     /// The request body is not what the route accepts.
     InvalidRequest,
+    /// The declared or received archive size exceeds the accepted maximum.
+    PayloadTooLarge,
 }
 
 impl FailureKind {
     /// Every kind, in status order. The array length is the documented count,
     /// so adding a variant without updating it does not compile.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::InvalidRequest,
         Self::Unauthenticated,
         Self::NotFound,
+        Self::PayloadTooLarge,
         Self::RouteNotFound,
         Self::MethodNotAllowed,
     ];
@@ -171,6 +177,7 @@ impl FailureKind {
             Self::MethodNotAllowed => &METHOD_NOT_ALLOWED,
             Self::Unauthenticated => &UNAUTHENTICATED,
             Self::NotFound => &NOT_FOUND,
+            Self::PayloadTooLarge => &PAYLOAD_TOO_LARGE,
             Self::InvalidRequest => &INVALID_REQUEST,
         }
     }
@@ -224,6 +231,17 @@ static INVALID_REQUEST: LazyLock<PublicFault> = LazyLock::new(|| {
         StatusCode::BAD_REQUEST,
         "chatgpt.request.invalid",
         "The request body is not what this endpoint accepts.",
+        false,
+    )
+});
+
+/// `chatgpt.request.too_large` — 413. Not retryable as-is: identical bytes
+/// exceed the configured maximum regardless of timing.
+static PAYLOAD_TOO_LARGE: LazyLock<PublicFault> = LazyLock::new(|| {
+    entry(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "chatgpt.request.too_large",
+        "The archive exceeds the accepted maximum size.",
         false,
     )
 });

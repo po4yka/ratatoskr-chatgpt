@@ -26,8 +26,38 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Telemetry pipeline configuration.
     pub telemetry: TelemetryConfig,
+    /// Archive receipt configuration.
+    pub receipt: ReceiptConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
+}
+
+/// One configured tenant credential: a bearer token bound to exactly one
+/// archive account reference.
+#[derive(Clone)]
+pub struct TenantToken {
+    /// The bearer credential. Never rendered.
+    pub token: SecretString,
+    /// The account external reference the token authenticates to.
+    pub account_external_ref: String,
+}
+
+impl core::fmt::Debug for TenantToken {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TenantToken")
+            .field("token", &"[REDACTED]")
+            .field("account_external_ref", &self.account_external_ref)
+            .finish()
+    }
+}
+
+/// Archive receipt configuration.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReceiptConfig {
+    /// Bearer tokens that may authenticate a receipt, one per tenant.
+    #[serde(skip_serializing)]
+    pub tenant_tokens: Vec<TenantToken>,
 }
 
 /// Loopback operator listener configuration.
@@ -49,6 +79,9 @@ pub struct StorageConfig {
     /// source tree.
     #[serde(skip_serializing)]
     pub database_url: Option<SecretString>,
+    /// Directory holding receipt staging files while an upload streams in.
+    /// Absent until configured; without it the receipt surface does not mount.
+    pub receipt_staging_root: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for StorageConfig {
@@ -56,6 +89,7 @@ impl std::fmt::Debug for StorageConfig {
         formatter
             .debug_struct("StorageConfig")
             .field("blob_root", &self.blob_root)
+            .field("receipt_staging_root", &self.receipt_staging_root)
             .field("database_url", &"[REDACTED]")
             .finish()
     }
@@ -77,6 +111,8 @@ pub struct Limits {
     pub database_acquire_timeout_ms: u64,
     /// Maximum graceful shutdown duration.
     pub shutdown_timeout_ms: u64,
+    /// Maximum accepted archive size in bytes.
+    pub max_archive_bytes: u64,
 }
 
 /// One configuration violation. The offending key and the rule it broke, and
@@ -189,6 +225,9 @@ const KEY_LOG_FILTER: &str = "RATATOSKR__TELEMETRY__LOG_FILTER";
 const KEY_DATABASE_CONNECTIONS: &str = "RATATOSKR__LIMITS__DATABASE_CONNECTIONS";
 const KEY_DATABASE_ACQUIRE_TIMEOUT_MS: &str = "RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS";
 const KEY_SHUTDOWN_TIMEOUT_MS: &str = "RATATOSKR__LIMITS__SHUTDOWN_TIMEOUT_MS";
+const KEY_MAX_ARCHIVE_BYTES: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES";
+const KEY_RECEIPT_STAGING_ROOT: &str = "RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT";
+const KEY_TENANT_TOKENS: &str = "RATATOSKR__RECEIPT__TENANT_TOKENS";
 
 fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec<Violation>) {
     let refused = |rule: &'static str| Violation {
@@ -236,6 +275,44 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 Err(rule) => violations.push(refused(rule)),
             }
         }
+        KEY_MAX_ARCHIVE_BYTES => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_archive_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        KEY_RECEIPT_STAGING_ROOT => match parse_absolute_path(value) {
+            Ok(path) => config.storage.receipt_staging_root = Some(path),
+            Err(()) => violations.push(refused("must be an absolute directory path")),
+        },
+        KEY_TENANT_TOKENS => {
+            let refused_token = |rule: &'static str| Violation {
+                key: key.to_owned(),
+                rule,
+            };
+            if value.is_empty() {
+                violations.push(refused_token(
+                    "must be a comma-separated list of <token>=<account-ref> pairs",
+                ));
+            } else {
+                for entry in value.split(',') {
+                    let Some((token, reference)) = entry.split_once('=') else {
+                        violations.push(refused_token(
+                            "must be a comma-separated list of <token>=<account-ref> pairs",
+                        ));
+                        continue;
+                    };
+                    if token.is_empty() || reference.is_empty() {
+                        violations.push(refused_token(
+                            "every pair needs a non-empty token and a non-empty account reference",
+                        ));
+                        continue;
+                    }
+                    config.receipt.tenant_tokens.push(TenantToken {
+                        token: SecretString::from(token.to_owned()),
+                        account_external_ref: reference.to_owned(),
+                    });
+                }
+            }
+        }
         _ => violations.push(refused("is not recognized")),
     }
 }
@@ -278,14 +355,21 @@ impl Default for Config {
             storage: StorageConfig {
                 blob_root: None,
                 database_url: None,
+                receipt_staging_root: None,
             },
             telemetry: TelemetryConfig {
                 log_filter: "info".to_owned(),
+            },
+            receipt: ReceiptConfig {
+                tenant_tokens: Vec::new(),
             },
             limits: Limits {
                 database_connections: 8,
                 database_acquire_timeout_ms: 5_000,
                 shutdown_timeout_ms: 10_000,
+                // Generous default for full account exports with assets:
+                // 16 GiB, overridable per deployment through limits.
+                max_archive_bytes: 17_179_869_184,
             },
         }
     }

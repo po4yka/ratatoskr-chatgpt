@@ -26,28 +26,37 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.accounts (
 
 -- One received provider archive or compliance feed. The immutable original
 -- lives in BlobStore; this row carries its reference and provenance.
+-- Digest uniqueness is per tenant: two accounts may hold equal bytes as
+-- separate exports while BlobStore deduplicates storage by content address.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.exports (
     id                UUID PRIMARY KEY,
-    account_id        UUID REFERENCES chatgpt_archive.accounts (id),
+    account_id        UUID NOT NULL REFERENCES chatgpt_archive.accounts (id),
     acquisition_mode  TEXT NOT NULL CHECK (acquisition_mode IN ('consumer_export', 'edu_export', 'compliance_log', 'manual_capture', 'legacy_import')),
     blob_ref          JSONB NOT NULL,
-    sha256_hex        CHAR(64) NOT NULL UNIQUE,
+    sha256_hex        CHAR(64) NOT NULL,
     byte_length       BIGINT NOT NULL CHECK (byte_length >= 0),
     received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    import_started_at TIMESTAMPTZ
+    import_started_at TIMESTAMPTZ,
+    CONSTRAINT exports_digest_per_account_unique UNIQUE (account_id, sha256_hex)
 );
 
--- Durable state machine runs for one export.
+-- Durable state machine runs for one export. A run exists before its export
+-- row materializes (nullable link); digest evidence lands at `hashed`.
+-- The parser version stays unset until a parser has touched the run.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.import_runs (
-    id             UUID PRIMARY KEY,
-    export_id      UUID NOT NULL REFERENCES chatgpt_archive.exports (id),
-    parser_version TEXT NOT NULL,
-    schema_id      TEXT,
-    state          TEXT NOT NULL CHECK (state IN ('received', 'stored', 'inspecting', 'schema_detected', 'extracting', 'staging', 'validating', 'reconciling', 'publishing', 'completed', 'partial', 'failed', 'quarantined')),
-    correlation_id UUID,
-    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at    TIMESTAMPTZ,
-    CONSTRAINT import_runs_one_terminal_finish UNIQUE (id)
+    id              UUID PRIMARY KEY,
+    export_id       UUID REFERENCES chatgpt_archive.exports (id),
+    account_ref     TEXT,
+    acquisition_mode TEXT,
+    media_type      TEXT,
+    parser_version  TEXT,
+    schema_id       TEXT,
+    state           TEXT NOT NULL CHECK (state IN ('received', 'hashed', 'stored', 'inspected', 'parsed', 'reconciled', 'completed', 'partial', 'failed', 'duplicate', 'quarantined')),
+    correlation_id  UUID,
+    sha256_hex      CHAR(64),
+    byte_length     BIGINT CHECK (byte_length IS NULL OR byte_length >= 0),
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ
 );
 
 -- Projects observed in exports; components arrive as later columns/tables, in place.

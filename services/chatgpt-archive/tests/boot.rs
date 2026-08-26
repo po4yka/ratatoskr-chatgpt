@@ -135,6 +135,61 @@ mod reqwestless {
             .await
             .map_err(|error| format!("the blocking probe task failed: {error}"))?
     }
+
+    /// A raw `POST /exports` with the receipt's required headers.
+    pub(crate) async fn post_export(
+        port: u16,
+        token: &str,
+        body: &'static [u8],
+    ) -> Result<Status, String> {
+        let head = format!(
+            "POST /exports HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nX-Ratatoskr-Acquisition: consumer_export\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read as _, Write as _};
+            use std::net::TcpStream;
+
+            let mut stream = TcpStream::connect(("127.0.0.1", port))
+                .map_err(|error| format!("connect: {error}"))?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .map_err(|error| format!("read timeout: {error}"))?;
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .map_err(|error| format!("write timeout: {error}"))?;
+            stream
+                .write_all(head.as_bytes())
+                .map_err(|error| format!("write: {error}"))?;
+            stream
+                .write_all(body)
+                .map_err(|error| format!("write body: {error}"))?;
+            let mut buffer = Vec::new();
+            stream
+                .read_to_end(&mut buffer)
+                .map_err(|error| format!("read: {error}"))?;
+            if buffer.is_empty() {
+                return Err("empty response".to_owned());
+            }
+            let text = String::from_utf8_lossy(&buffer);
+            let code: u16 = text
+                .split_whitespace()
+                .nth(1)
+                .ok_or_else(|| format!("no status line in {text:?}"))?
+                .parse()
+                .map_err(|error| format!("status parse: {error} from {text:?}"))?;
+            let response_body = text
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body.to_owned())
+                .unwrap_or_default();
+            Ok(Status {
+                code,
+                body: response_body,
+            })
+        })
+        .await
+        .map_err(|error| format!("the blocking post task failed: {error}"))?
+    }
 }
 
 /// The full local acceptance: live answers, ready answers without a database,
@@ -185,5 +240,75 @@ async fn boot_serves_health_and_logs_structured_lines() -> Result<(), Box<dyn st
         seen_startup_line,
         "the process must log one structured startup record"
     );
+    Ok(())
+}
+
+/// A synthetic archive body: opaque bytes at the receipt stage.
+const BODY: &[u8] = b"PK\x03\x04 ratatoskr synthetic export fixture";
+
+/// The full receipt acceptance: with staging, tenant tokens, blob root and a
+/// database configured, `POST /exports` stores fresh content once and then
+/// answers duplicate for the identical re-upload. Skips without the database
+/// URL exactly like the schema integration tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn receipt_route_serves_end_to_end_when_configured() -> Result<(), Box<dyn std::error::Error>>
+{
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the boot harness reads the database URL the runner exports"
+    )]
+    let database_url = std::env::var("CHATGPT_TEST_DATABASE_URL").ok();
+    let Some(database_url) = database_url.filter(|url| !url.trim().is_empty()) else {
+        eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+
+    let admin_port = free_loopback_port()?;
+    let blob_root = tempfile::tempdir()?;
+    let staging_root = tempfile::tempdir()?;
+    let tenant_tokens = format!("e2e-token=acc-e2e-{admin_port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ratatoskr-chatgpt-archive"));
+    let service = {
+        let child = command
+            .env(
+                "RATATOSKR__ADMIN__LISTEN_ADDRESS",
+                format!("127.0.0.1:{admin_port}"),
+            )
+            .env("RATATOSKR__STORAGE__BLOB_ROOT", blob_root.path())
+            .env(
+                "RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT",
+                staging_root.path(),
+            )
+            .env("RATATOSKR__RECEIPT__TENANT_TOKENS", tenant_tokens)
+            .env("RATATOSKR__STORAGE__DATABASE_URL", database_url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        ServiceProcess {
+            child,
+            stdout_lines: std::sync::mpsc::channel().1,
+        }
+    };
+    wait_for_live(admin_port)
+        .await
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+
+    let first = reqwestless::post_export(admin_port, "e2e-token", BODY).await?;
+    assert_eq!(
+        first.code, 201,
+        "fresh content answers stored: {}",
+        first.body
+    );
+    let json = serde_json::from_str::<serde_json::Value>(&first.body)?;
+    assert_eq!(json.get("outcome").and_then(|v| v.as_str()), Some("stored"));
+
+    let second = reqwestless::post_export(admin_port, "e2e-token", BODY).await?;
+    assert_eq!(second.code, 200, "identical content answers duplicate");
+    let json = serde_json::from_str::<serde_json::Value>(&second.body)?;
+    assert_eq!(
+        json.get("outcome").and_then(|v| v.as_str()),
+        Some("duplicate")
+    );
+    drop(service);
     Ok(())
 }

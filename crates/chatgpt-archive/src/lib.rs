@@ -7,8 +7,12 @@
 //! taxonomy and its single HTTP rendering site, the operator admin plane,
 //! content-addressed blob storage under the fleet `BlobRef` contract, and
 //! application of the first-version `chatgpt_archive` schema. Archive
-//! receipt, safe extraction, parsers, graph reconciliation, and portable
-//! exports arrive with later implementation plan items.
+//! receipt (plan item 2) adds the authenticated, tenant-scoped `POST
+//! /exports` surface: streaming SHA-256 into isolated staging, size caps,
+//! immutable raw evidence through the fleet [`BlobStore`], duplicate outcomes
+//! by per-tenant digest, and a durable resumable import state machine. Safe
+//! extraction, parsers, graph reconciliation, and portable exports arrive
+//! with later implementation plan items.
 
 pub mod config;
 
@@ -33,3 +37,13 @@ pub use blob_store::{BlobStore, BlobStoreError};
 pub mod persistence;
 
 pub use persistence::{Database, PersistenceError};
+
+pub mod receipt;
+
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
+pub use receipt::{
+    AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome, ReceiptRepository,
+    RepositoryError, RunRecord,
+};

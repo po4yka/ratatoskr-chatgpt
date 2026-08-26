@@ -2,7 +2,7 @@
 
 `ratatoskr-chatgpt` is the ChatGPT archive bounded context for Ratatoskr. It preserves official ChatGPT data exports as immutable evidence, normalizes projects and conversation graphs, archives referenced assets, and publishes searchable local projections without depending on a live ChatGPT browser session.
 
-> **Status:** service scaffold implemented. The Rust workspace builds a `ratatoskr-chatgpt-archive` binary that boots with typed configuration, structured JSON telemetry, `/health/live` + `/health/ready` + `/metrics` + `/version` endpoints, content-addressed BlobStore storage, and applies the first-version `chatgpt_archive` schema (`schema.sql`). Not implemented yet: export receipt and safe extraction, parsers, import runs, graph reconciliation, events, portable exports, Compliance adapters — everything from implementation plan item 2 on.
+> **Status:** service scaffold and authenticated archive receipt implemented. The Rust workspace builds a `ratatoskr-chatgpt-archive` binary that boots with typed configuration, structured JSON telemetry, `/health/live` + `/health/ready` + `/metrics` + `/version` endpoints, content-addressed BlobStore storage, applies the first-version `chatgpt_archive` schema (`schema.sql`), and serves `POST /exports`: an authenticated, tenant-scoped receipt that streams uploads through SHA-256 into isolated staging, enforces the configured size cap, publishes immutable raw evidence through BlobStore, records durable resumable import runs (`received -> hashed -> stored -> inspected -> parsed -> reconciled -> complete/partial`, `failed`/`duplicate` terminals), and answers duplicate archives explicitly by per-tenant digest. Not implemented yet: safe archive inspection/extraction and parsers (plan items 3–4), graph reconciliation and completeness reports (item 5), events, portable exports, Compliance adapters.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -21,9 +21,21 @@
 docker compose up -d postgres          # PostgreSQL 17 on 127.0.0.1:5439
 export RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9084
 export RATATOSKR__STORAGE__BLOB_ROOT=/tmp/ratatoskr-chatgpt/blobs
+export RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT=/tmp/ratatoskr-chatgpt/staging
+export RATATOSKR__RECEIPT__TENANT_TOKENS='dev-token=local-account'
 export RATATOSKR__STORAGE__DATABASE_URL=postgres://chatgpt:chatgpt@127.0.0.1:5439/chatgpt
 cargo run -p ratatoskr-chatgpt-archive-service
 curl http://127.0.0.1:9084/health/ready
+```
+
+With staging root and tokens configured, upload an export:
+
+```bash
+curl -X POST http://127.0.0.1:9084/exports \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'X-Ratatoskr-Acquisition: consumer_export' \
+  -H 'Content-Type: application/zip' \
+  --data-binary @chatgpt-export.zip
 ```
 
 The validation commands are in `DEVELOPMENT.md`; CI enforces the same list.
@@ -357,6 +369,8 @@ Import and event handlers are idempotent. The archive SHA-256 prevents duplicate
 7. External model analysis is opt-in and governed by Knowledge provider policy.
 8. Temporary or incognito content is not claimed as backed up unless present in an authoritative export or Compliance source.
 9. Missing records do not trigger destructive local deletion.
+
+Receipt authentication today is a configured bearer-token map (`RATATOSKR__RECEIPT__TENANT_TOKENS`), one token per personal-kind tenant account. This is an explicit stopgap until Platform issues device tokens: there is no rotation, no per-token audit identity beyond the account reference, and workspace-kind accounts cannot be expressed yet. Treat the token list like any other secret-bearing configuration.
 
 ## Observability
 

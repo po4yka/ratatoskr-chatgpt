@@ -14,8 +14,12 @@ use std::sync::Arc;
 
 use ratatoskr_chatgpt_archive::admin::{RuntimeState, admin_router};
 use ratatoskr_chatgpt_archive::config::Config;
-use ratatoskr_chatgpt_archive::persistence::Database;
-use ratatoskr_chatgpt_archive::{BlobStore, init_telemetry};
+use ratatoskr_chatgpt_archive::persistence::{Database, PersistenceError};
+use ratatoskr_chatgpt_archive::receipt::ReceiptError;
+use ratatoskr_chatgpt_archive::receipt::auth::ConfigTenantAuthenticator;
+use ratatoskr_chatgpt_archive::receipt::http::{ReceiptApiState, router as receipt_router};
+use ratatoskr_chatgpt_archive::receipt::pg::PostgresReceiptRepository;
+use ratatoskr_chatgpt_archive::{ArchiveReceiver, BlobStore, init_telemetry};
 
 /// A failure that prevents the process from serving.
 #[derive(Debug, thiserror::Error)]
@@ -26,7 +30,7 @@ pub enum ServiceError {
     Telemetry(#[from] ratatoskr_chatgpt_archive::TelemetryError),
     /// The database was configured but unusable.
     #[error("database failed")]
-    Persistence(#[from] ratatoskr_chatgpt_archive::PersistenceError),
+    Persistence(#[from] PersistenceError),
     /// A listener could not bind.
     #[error("the admin listener could not bind")]
     Bind(#[source] std::io::Error),
@@ -36,6 +40,9 @@ pub enum ServiceError {
     /// The blob storage root was unusable.
     #[error("blob storage failed")]
     BlobStore(#[from] ratatoskr_chatgpt_archive::BlobStoreError),
+    /// Archive receipt could not anchor its staging or storage.
+    #[error("archive receipt failed")]
+    Receipt(#[from] ReceiptError),
     /// The blob storage root is not configured. Unreachable through the real
     /// loader: configuration refuses to start without one.
     #[error("the blob storage root is not configured")]
@@ -94,34 +101,62 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
 
     let state = Arc::new(RuntimeState::new());
 
-    // The database is optional at this milestone: without a URL there is one
-    // fewer readiness check, not a refusal.
-    if config.storage.database_url.is_some() {
-        let database = Database::connect(&config.storage, &config.limits).await?;
-        database.apply_schema().await?;
-        let probe = Arc::new(database);
-        state.register_check("database", move || {
-            let probe = Arc::clone(&probe);
-            async move { probe.ping().await.map_err(|error| error.to_string()) }
-        });
-    }
-
     // Prepare the archive root before anything can write into it.
     let root = config
         .storage
         .blob_root
         .clone()
         .ok_or(ServiceError::MissingBlobRoot)?;
-    BlobStore::new(&root)?;
+    let blob = BlobStore::new(&root)?;
+
+    // Durable receipt needs a database and a staging location; without
+    // either, the public surface simply does not mount and the admin plane
+    // serves alone.
+    let mut public_routes = None;
+    if config.storage.database_url.is_some() {
+        let database = Arc::new(Database::connect(&config.storage, &config.limits).await?);
+        database.apply_schema().await?;
+        {
+            let probe = Arc::clone(&database);
+            state.register_check("database", move || {
+                let probe = Arc::clone(&probe);
+                async move { probe.ping().await.map_err(|error| error.to_string()) }
+            });
+        }
+
+        if let Some(staging_root) = config.storage.receipt_staging_root.clone() {
+            let repository = PostgresReceiptRepository::new(database.pool().clone());
+            let receiver = ArchiveReceiver::new(
+                blob,
+                Arc::new(repository),
+                staging_root,
+                config.limits.max_archive_bytes,
+            )?;
+            let swept = receiver.sweep_interrupted().await;
+            if swept > 0 {
+                tracing::info!(runs = swept, "swept interrupted import runs");
+            }
+            let authenticator = Arc::new(ConfigTenantAuthenticator::from_config(&config.receipt));
+            public_routes = Some(receipt_router(Arc::new(ReceiptApiState::new(
+                receiver,
+                authenticator,
+            ))));
+        }
+    }
 
     let listener = tokio::net::TcpListener::bind(config.admin.listen_address)
         .await
         .map_err(ServiceError::Bind)?;
 
-    let app = admin_router(state, move || metrics_handle.render());
+    let receipt_served = public_routes.is_some();
+    let mut app = admin_router(Arc::clone(&state), move || metrics_handle.render());
+    if let Some(public) = public_routes {
+        app = app.merge(public);
+    }
 
     tracing::info!(
         address = %config.admin.listen_address,
+        receipt_served,
         "listening"
     );
 
