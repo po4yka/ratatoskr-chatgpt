@@ -7,8 +7,8 @@
 )]
 
 use ratatoskr_ai_archive_contracts::{
-    AiArchiveProvenance, AiArchiveTombstone, AiConversation, AiConversationAdded, AiProject,
-    AiProjectAdded,
+    AiArchiveImport, AiArchiveProvenance, AiArchiveTombstone, AiConversation, AiConversationAdded,
+    AiProject, AiProjectAdded,
 };
 use ratatoskr_chatgpt_archive::NormalizedArchiveEvent;
 use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, DigestHex, Extensions};
@@ -18,6 +18,14 @@ const PROVENANCE: &str = r#"{
   "provider":"chatgpt", "owner":"user:018f0000-0000-7000-8000-000000000005",
   "source_export":{"owner_service":"ratatoskr-chatgpt","digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"media_type":"application/json","length_bytes":512},
   "imported_at":"2026-08-17T10:00:00Z", "parser_name":"chatgpt_export", "parser_version":"2026.08.1"
+}"#;
+
+const IMPORT: &str = r#"{
+  "ai_archive_id":"018f0000-0000-7000-8000-000000000402",
+  "provider":"chatgpt", "owner":"user:018f0000-0000-7000-8000-000000000005",
+  "source_export":{"owner_service":"ratatoskr-chatgpt","digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"media_type":"application/json","length_bytes":512},
+  "imported_at":"2026-08-17T10:00:00Z", "parser_name":"chatgpt_export", "parser_version":"2026.08.1",
+  "completeness_report":{"completeness":"complete","conversation_count":1,"message_count":1,"asset_count":0,"gap_count":0}
 }"#;
 
 const CONVERSATION: &str = r#"{
@@ -32,6 +40,21 @@ const PROJECT: &str = r#"{
   "ai_project_id":"018f0000-0000-7000-8000-000000000404", "provider":"chatgpt",
   "title":"Rust notes", "parser_name":"chatgpt_export", "parser_version":"2026.08.1"
 }"#;
+
+#[test]
+fn import_event_round_trips_the_published_contract_fixture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let payload: AiArchiveImport = serde_json::from_str(IMPORT)?;
+    let event = NormalizedArchiveEvent::archive_imported(payload)?;
+    assert_eq!(event.event_type, "ai_archive.archive.imported.v1");
+    let round_trip: AiArchiveImport = serde_json::from_value(event.payload)?;
+    round_trip.validate()?;
+    assert_eq!(
+        round_trip.ai_archive_id.to_string(),
+        "018f0000-0000-7000-8000-000000000402"
+    );
+    Ok(())
+}
 
 #[test]
 fn conversation_event_round_trips_the_published_contract_fixture()

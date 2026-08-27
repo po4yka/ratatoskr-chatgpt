@@ -1,8 +1,8 @@
 //! Transactional publication records for normalized AI archive facts.
 
 use ratatoskr_ai_archive_contracts::{
-    AiArchiveTombstone, AiConversationAdded, AiConversationUpdated, AiProjectAdded,
-    AiProjectUpdated,
+    AiArchiveImport, AiArchiveTombstone, AiConversationAdded, AiConversationUpdated,
+    AiProjectAdded, AiProjectUpdated,
 };
 use ratatoskr_event_envelope::EventPayload;
 use uuid::Uuid;
@@ -36,6 +36,15 @@ pub enum OutboxError {
 }
 
 impl NormalizedArchiveEvent {
+    /// Constructs a conforming completed-import event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxError`] if the payload cannot be encoded.
+    pub fn archive_imported(payload: AiArchiveImport) -> Result<Self, OutboxError> {
+        Self::encode(payload.ai_archive_id.0, payload)
+    }
+
     /// Constructs a conforming conversation-added event.
     ///
     /// # Errors
@@ -112,7 +121,7 @@ impl Database {
     ///
     /// Returns [`OutboxError`] when the event cannot be stored.
     pub async fn enqueue_normalized_event(
-        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         event: &NormalizedArchiveEvent,
         correlation_id: Option<Uuid>,
     ) -> Result<(), OutboxError> {
@@ -125,7 +134,7 @@ impl Database {
         .bind(event.aggregate_id)
         .bind(&event.payload)
         .bind(correlation_id)
-        .execute(self.pool())
+        .execute(&mut **transaction)
         .await
         .map_err(OutboxError::Store)?;
         Ok(())
