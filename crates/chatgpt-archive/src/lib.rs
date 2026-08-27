@@ -15,8 +15,10 @@
 //! through immutable `BlobRefs`, while parser registration selects a supported
 //! version from structural evidence. A narrow synthetic conversations parser
 //! produces deterministic, loss-aware records without claiming real-export
-//! support; graph reconciliation and portable exports arrive with later plan
-//! items.
+//! support. The public reconciliation boundary then builds append-only
+//! conversation/message revisions, non-destructive missing observations,
+//! graph warnings, and conservative in-memory completeness reports. It is not
+//! yet wired into receipt persistence or outbound archive events.
 
 pub mod config;
 
@@ -51,6 +53,7 @@ pub use persistence::{Database, PersistenceError};
 
 pub mod parser_registry;
 pub mod receipt;
+pub mod reconciliation;
 pub mod synthetic_parser;
 pub use parser_registry::{
     ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
@@ -67,4 +70,10 @@ pub mod test_support;
 pub use receipt::{
     AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome, ReceiptRepository,
     RepositoryError, RunRecord,
+};
+pub use reconciliation::{
+    ArchiveCompletenessReport, ArchiveReconciler, ArchiveSnapshot, Completeness,
+    ConversationHistory, CoverageGap, CumulativeCompletenessReport, MessageHistory, Observation,
+    ObservationState, ReconciliationResult, ReconciliationWarning, Revision, RevisionStatistics,
+    WarningCode,
 };
