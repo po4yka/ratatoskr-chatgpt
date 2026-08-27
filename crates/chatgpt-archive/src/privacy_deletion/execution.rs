@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use futures_util::stream;
 use ratatoskr_ai_archive_contracts::AiArchiveTombstone;
-use ratatoskr_identifiers::BlobRef;
+use ratatoskr_identifiers::{BlobRef, WireTimestamp};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -71,12 +71,7 @@ impl PrivacyDeletionService {
         let plan = load_plan(&self.pool, request_id, &durable).await?;
         purge_blobs(self, request_id).await?;
 
-        let completed_at: String = sqlx::query_scalar(
-            "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC',
-             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let completed_at = completion_timestamp(WireTimestamp::now());
         let evidence_bytes = serde_json::to_vec(&serde_json::json!({
             "request_id": request_id,
             "scope": plan.scope,
@@ -100,6 +95,10 @@ impl PrivacyDeletionService {
         finalize(self, &durable, &report, fault).await?;
         Ok(report)
     }
+}
+
+fn completion_timestamp(timestamp: WireTimestamp) -> String {
+    timestamp.to_wire()
 }
 
 struct DurableRequest {
@@ -565,4 +564,19 @@ async fn delete_i64_category(
         .execute(&mut **transaction)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatoskr_identifiers::WireTimestamp;
+
+    use super::completion_timestamp;
+
+    #[test]
+    fn completion_timestamp_does_not_pad_fractional_seconds() {
+        let timestamp = WireTimestamp::parse("2026-08-27T13:37:00.94Z")
+            .expect("the regression instant is canonical");
+
+        assert_eq!(completion_timestamp(timestamp), "2026-08-27T13:37:00.94Z");
+    }
 }
