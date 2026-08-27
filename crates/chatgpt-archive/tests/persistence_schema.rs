@@ -132,9 +132,10 @@ async fn insert_export(
     digest: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query(
-        "INSERT INTO chatgpt_archive.exports (id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length) VALUES ($1, $2, 'consumer_export', '{}', $3, 10)",
+        "INSERT INTO chatgpt_archive.exports (id, ai_archive_id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length) VALUES ($1, $2, $3, 'consumer_export', '{}', $4, 10)",
     )
     .bind(id)
+    .bind(Uuid::now_v7())
     .bind(account)
     .bind(digest)
     .execute(database.pool())
