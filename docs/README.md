@@ -7,6 +7,7 @@
 - `DATA_MODEL.md` — planned `chatgpt_archive` schema.
 - `THREAT_MODEL.md` — archive, parser, privacy, content, and Compliance risks.
 - `TESTING.md` — fixtures, parser, graph, completeness, and security tests.
+- `testing/OWNER_FIXTURE_DISCOVERY.md` — owner-authorized private export discovery and safe golden admission.
 - `IMPLEMENTATION_PLAN.md` — ordered archive vertical slices.
 - `adr/README.md` — decision process.
 

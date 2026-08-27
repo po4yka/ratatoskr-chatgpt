@@ -1,0 +1,12 @@
+{
+  "parser_selection": "unsupported",
+  "record_variants": [
+    "text",
+    "unknown"
+  ],
+  "relationship_shape": {
+    "branches": 1,
+    "orphans": 0
+  },
+  "completeness": "unknown"
+}

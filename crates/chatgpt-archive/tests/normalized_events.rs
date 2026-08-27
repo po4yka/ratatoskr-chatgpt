@@ -114,3 +114,24 @@ fn tombstone_event_round_trips_authoritative_deletion_evidence()
     );
     Ok(())
 }
+
+#[test]
+fn user_requested_deletion_event_round_trips() {
+    let parsed = serde_json::from_str::<AiArchiveTombstone>(
+        r#"{
+      "ai_archive_id":"018f0000-0000-7000-8000-000000000402", "provider":"chatgpt",
+      "owner":"user:018f0000-0000-7000-8000-000000000005", "subject":{"subject_kind":"conversation","ai_conversation_id":"018f0000-0000-7000-8000-000000000403"},
+      "reason":"user_requested", "evidence_ref":{"owner_service":"ratatoskr-chatgpt","digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"media_type":"application/json","length_bytes":512}, "observed_at":"2026-08-27T06:00:00Z"
+    }"#,
+    );
+    assert!(
+        parsed.is_ok(),
+        "the published deletion reason must deserialize: {parsed:?}"
+    );
+
+    let event = NormalizedArchiveEvent::tombstoned(parsed.expect("asserted successful parse"))
+        .expect("a valid tombstone must encode");
+    assert_eq!(event.event_type, "ai_archive.subject.tombstoned.v1");
+    let round_trip = serde_json::from_value::<AiArchiveTombstone>(event.payload);
+    assert!(round_trip.is_ok(), "encoded payload must round-trip");
+}

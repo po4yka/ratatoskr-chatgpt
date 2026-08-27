@@ -15,6 +15,8 @@ Required tests:
 - Planned workspace Export Agent -> ChatGPT -> Knowledge flow.
 
 Real personal exports are never committed; sanitized fixtures require explicit review.
+The complete owner-only discovery, minimization, comparison, review, admission, blessing, and
+disposition workflow is in [`testing/OWNER_FIXTURE_DISCOVERY.md`](testing/OWNER_FIXTURE_DISCOVERY.md).
 
 ## Test-first
 

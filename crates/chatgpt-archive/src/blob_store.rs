@@ -60,6 +60,9 @@ pub(crate) trait BlobBackend: core::fmt::Debug + Send + Sync {
 
     /// Names the path of `reference` without reading bytes.
     fn locate(&self, reference: &BlobRef) -> Result<PathBuf, BlobStoreError>;
+
+    /// Erases the exact object named by `reference`.
+    fn erase(&self, reference: BlobRef) -> BackendFuture<Result<(), BlobStoreError>>;
 }
 
 /// Blob storage failures.
@@ -148,6 +151,20 @@ impl BlobStore {
         }
         self.backend.locate(reference)
     }
+
+    /// Idempotently erases the exact content-addressed object named by a
+    /// reference. Callers must establish retained reachability first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BlobStoreError`] when the reference cannot name an erasable
+    /// object in this store.
+    pub async fn erase(&self, reference: &BlobRef) -> Result<(), BlobStoreError> {
+        if reference.owner_service.as_str() != OWNER {
+            return Err(BlobStoreError::Missing);
+        }
+        self.backend.erase(reference.clone()).await
+    }
 }
 
 /// Filesystem backend: staging plus hard-link publish, SHA-256 while
@@ -166,6 +183,19 @@ impl LocalFsBackend {
             root: root.to_path_buf(),
             owner,
         })
+    }
+
+    fn content_path(&self, reference: &BlobRef) -> Result<PathBuf, BlobStoreError> {
+        // The contract enum is non-exhaustive: any future algorithm fails
+        // closed here until its layout is decided deliberately.
+        if reference.digest.algorithm != DigestAlgorithm::Sha256 {
+            return Err(BlobStoreError::Missing);
+        }
+        let hex = reference.digest.hex.as_str();
+        let Some((directory, remainder)) = hex.split_at_checked(2) else {
+            return Err(BlobStoreError::Missing);
+        };
+        Ok(self.root.join("sha256").join(directory).join(remainder))
     }
 }
 
@@ -303,22 +333,72 @@ impl BlobBackend for LocalFsBackend {
     }
 
     fn locate(&self, reference: &BlobRef) -> Result<PathBuf, BlobStoreError> {
-        // The contract enum is non-exhaustive: any future algorithm fails
-        // closed here until its layout is decided deliberately.
-        if reference.digest.algorithm != DigestAlgorithm::Sha256 {
-            return Err(BlobStoreError::Missing);
-        }
-        let hex = reference.digest.hex.as_str();
-        // `hex` is 64 lowercase hex characters by contract grammar, so a short
-        // digest fails closed here rather than panicking on a slice.
-        let Some((directory, remainder)) = hex.split_at_checked(2) else {
-            return Err(BlobStoreError::Missing);
-        };
-        let path = self.root.join("sha256").join(directory).join(remainder);
+        let path = self.content_path(reference)?;
         if path.is_file() {
             Ok(path)
         } else {
             Err(BlobStoreError::Missing)
         }
+    }
+
+    fn erase(&self, reference: BlobRef) -> BackendFuture<Result<(), BlobStoreError>> {
+        let path = match self.content_path(&reference) {
+            Ok(path) => path,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let object_root = self.root.join("sha256");
+        let hex = reference.digest.hex.as_str();
+        let Some((directory, remainder)) = hex.split_at_checked(2) else {
+            return Box::pin(async { Err(BlobStoreError::Missing) });
+        };
+        let relative_path = PathBuf::from(directory).join(remainder);
+        Box::pin(async move {
+            use tokio::io::AsyncReadExt as _;
+
+            let metadata = match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(BlobStoreError::Unavailable(error)),
+            };
+            if !metadata.file_type().is_file() || metadata.len() != reference.length_bytes {
+                return Err(BlobStoreError::Missing);
+            }
+
+            let canonical_root = tokio::fs::canonicalize(&object_root)
+                .await
+                .map_err(|_| BlobStoreError::Missing)?;
+            let canonical_path = tokio::fs::canonicalize(&path)
+                .await
+                .map_err(|_| BlobStoreError::Missing)?;
+            if canonical_path != canonical_root.join(relative_path) {
+                return Err(BlobStoreError::Missing);
+            }
+
+            let mut file = tokio::fs::File::open(&path)
+                .await
+                .map_err(|_| BlobStoreError::Missing)?;
+            let mut hasher = sha2::Sha256::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|_| BlobStoreError::Missing)?;
+                if read == 0 {
+                    break;
+                }
+                let Some(chunk) = buffer.get(..read) else {
+                    return Err(BlobStoreError::Missing);
+                };
+                hasher.update(chunk);
+            }
+            if hex::encode(hasher.finalize()) != reference.digest.hex.as_str() {
+                return Err(BlobStoreError::Missing);
+            }
+            drop(file);
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(BlobStoreError::Unavailable)
+        })
     }
 }

@@ -172,3 +172,64 @@ async fn invalid_media_type_is_rejected() {
         .await
         .expect("an object stored after a refusal must verify");
 }
+
+#[tokio::test]
+async fn erase_is_exact_and_idempotent() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let store = BlobStore::new(root.path()).expect("owner identity is fixed");
+    let erased = store
+        .store(MEDIA_TYPE, stream_of(b"exclusive bytes"))
+        .await
+        .expect("exclusive object stores");
+    let sibling = store
+        .store(MEDIA_TYPE, stream_of(b"sibling bytes"))
+        .await
+        .expect("sibling object stores");
+
+    store.erase(&erased).await.expect("first erase succeeds");
+    assert!(
+        store.verify(&erased).await.is_err(),
+        "the exclusively named object must be absent after erasure"
+    );
+    store.erase(&erased).await.expect("replayed erase succeeds");
+    store
+        .verify(&sibling)
+        .await
+        .expect("erasure must not touch a sibling object");
+}
+
+#[tokio::test]
+async fn erase_refuses_foreign_and_malformed_references() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let store = BlobStore::new(root.path()).expect("owner identity is fixed");
+    let foreign_target = store
+        .store(MEDIA_TYPE, stream_of(b"foreign refusal target"))
+        .await
+        .expect("foreign target stores");
+    let malformed_target = store
+        .store(MEDIA_TYPE, stream_of(b"malformed refusal target"))
+        .await
+        .expect("malformed target stores");
+
+    let mut foreign = foreign_target.clone();
+    foreign.owner_service =
+        ratatoskr_identifiers::BlobOwner::parse("ratatoskr-extractor").expect("valid owner form");
+    let foreign_result = store.erase(&foreign).await;
+    assert!(foreign_result.is_err(), "foreign erasure must be refused");
+    store
+        .verify(&foreign_target)
+        .await
+        .expect("foreign refusal must leave local bytes intact");
+
+    let mut malformed = malformed_target.clone();
+    malformed.length_bytes = malformed.length_bytes.saturating_add(1);
+    let malformed_result = store.erase(&malformed).await;
+    assert!(
+        malformed_result.is_err(),
+        "a reference contradicting the exact stored file must be refused"
+    );
+    store
+        .verify(&malformed_target)
+        .await
+        .expect("malformed refusal must leave local bytes intact");
+}

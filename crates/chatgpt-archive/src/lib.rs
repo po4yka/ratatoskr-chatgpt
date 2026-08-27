@@ -32,6 +32,7 @@ pub use telemetry::{TelemetryError, TelemetryGuard, init_telemetry};
 
 pub mod error;
 pub mod fault;
+pub mod fixture_admission;
 
 pub use error::{ArchiveError, FailureKind, PublicFault, Subsystem};
 pub use fault::render_error_envelope;
@@ -54,13 +55,17 @@ pub mod persistence;
 pub use persistence::{Database, PersistenceError};
 
 pub mod outbox;
+pub mod parser_migration;
 pub mod parser_registry;
 pub mod portable_export;
+pub mod privacy_deletion;
 pub mod receipt;
 pub mod reconciliation;
+pub mod reparse;
 pub mod synthetic_parser;
 pub use parser_registry::{
-    ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
+    CompiledParser, ParserArtifactEvidence, ParserExecutionError, ParserExecutionInput,
+    ParserExecutor, ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
 };
 pub use synthetic_parser::{
     AssetAnomaly, AssetAvailability, AssetKind, ContentPartKind, InstructionKind, MessageRole,

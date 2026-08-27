@@ -16,11 +16,11 @@ repository = "https://github.com/po4yka/ratatoskr-chatgpt"
 ratatoskr-chatgpt-archive = { version = "=0.1.0", path = "crates/chatgpt-archive" }
 
 # ---- shared fleet contracts, pinned to one proven revision ----
-ratatoskr-identifiers          = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-error-contracts      = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-operation-contracts  = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-event-envelope       = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
+ratatoskr-identifiers          = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
+ratatoskr-error-contracts      = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
+ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
+ratatoskr-operation-contracts  = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
+ratatoskr-event-envelope       = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
 
 # ---- async runtime and HTTP ----
 tokio           = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

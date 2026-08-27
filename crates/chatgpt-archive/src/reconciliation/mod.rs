@@ -1,7 +1,7 @@
 //! Conservative reconciliation of parsed archive snapshots.
 
 mod core;
-mod digest;
+pub(crate) mod digest;
 mod model;
 mod report;
 

@@ -104,6 +104,70 @@ async fn second_application_changes_nothing() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// The current schema carries every relation and identity guard needed by
+/// privacy erasure and parser reprocessing; applying it twice stays safe.
+#[tokio::test]
+async fn schema_exposes_privacy_reparse_and_provenance_relations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = test_url() else {
+        eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let database = connected_database(&url).await?;
+    database.apply_schema().await?;
+    database.apply_schema().await?;
+
+    let relations = [
+        "chatgpt_archive.export_entity_observations",
+        "chatgpt_archive.extracted_artifacts",
+        "chatgpt_archive.privacy_deletion_requests",
+        "chatgpt_archive.privacy_deletion_items",
+        "chatgpt_archive.privacy_deletion_audits",
+        "chatgpt_archive.reparse_runs",
+        "chatgpt_archive.parser_migration_reports",
+    ];
+    for relation in relations {
+        let present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(relation)
+            .fetch_one(database.pool())
+            .await?;
+        assert!(present, "{relation} must exist in the current schema");
+    }
+
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT conname FROM pg_constraint
+         WHERE connamespace = 'chatgpt_archive'::regnamespace
+         ORDER BY conname",
+    )
+    .fetch_all(database.pool())
+    .await?;
+    for required in [
+        "export_observation_identity_unique",
+        "extracted_artifact_identity_unique",
+        "privacy_deletion_scope_shape",
+        "privacy_deletion_request_item_identity_unique",
+        "privacy_deletion_audit_request_unique",
+        "reparse_execution_identity_unique",
+        "parser_migration_operation_identity_unique",
+    ] {
+        assert!(
+            constraints.iter().any(|constraint| constraint == required),
+            "missing lifecycle constraint {required}"
+        );
+    }
+
+    let outbox_deduplicates: bool = sqlx::query_scalar(
+        "SELECT to_regclass('chatgpt_archive.outbox_deduplication_key_unique') IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await?;
+    assert!(
+        outbox_deduplicates,
+        "privacy tombstones require a durable outbox deduplication key"
+    );
+    Ok(())
+}
+
 // --- receipt-shape constraints (authenticated-archive-receipt) ---
 
 use uuid::Uuid;

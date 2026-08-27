@@ -1,10 +1,12 @@
 //! Parser registry selection matrix.
 
 use ratatoskr_chatgpt_archive::{
-    AcquisitionMode, ArchiveInventory, ParserId, ParserRegistration, ParserRegistry,
+    AcquisitionMode, ArchiveInventory, ParsedConversations, ParserExecutionError,
+    ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration, ParserRegistry,
     ParserSelection, RegistryError,
 };
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 fn inventory() -> ArchiveInventory {
     ArchiveInventory {
@@ -22,6 +24,35 @@ fn parser(name: &str) -> ParserRegistration {
         },
         modes: vec![AcquisitionMode::ConsumerExport],
         required_signals: BTreeSet::from(["conversations.json".to_owned()]),
+    }
+}
+
+fn versioned_parser(version: &str) -> ParserRegistration {
+    let mut parser = parser("chatgpt");
+    version.clone_into(&mut parser.id.version);
+    parser
+}
+
+#[derive(Debug)]
+struct EmptyParser;
+
+impl ParserExecutor for EmptyParser {
+    fn execute(
+        &self,
+        _input: ParserExecutionInput<'_>,
+    ) -> Result<ParsedConversations, ParserExecutionError> {
+        Ok(ParsedConversations {
+            schema_id: "synthetic.chatgpt.test".to_owned(),
+            parser: ParserId {
+                name: "chatgpt".to_owned(),
+                version: "1.10".to_owned(),
+            },
+            conversations: Vec::new(),
+            projects: Vec::new(),
+            canvas_documents: Vec::new(),
+            assets: Vec::new(),
+            raw_records: Vec::new(),
+        })
     }
 }
 
@@ -61,4 +92,53 @@ fn duplicate_identity_is_refused() {
         registry.register(parser("one")),
         Err(RegistryError::DuplicateIdentity)
     ));
+}
+
+#[test]
+fn compatible_versions_and_exact_lookup_are_deterministic() {
+    let mut forward = ParserRegistry::default();
+    let mut reverse = ParserRegistry::default();
+    for version in ["1.2", "1.10", "2.0"] {
+        forward
+            .register_compiled(versioned_parser(version), Arc::new(EmptyParser))
+            .expect("unique compiled parser");
+    }
+    for version in ["2.0", "1.10", "1.2"] {
+        reverse
+            .register_compiled(versioned_parser(version), Arc::new(EmptyParser))
+            .expect("unique compiled parser");
+    }
+    let expected = vec!["1.2", "1.10", "2.0"];
+    for registry in [&forward, &reverse] {
+        let compatible =
+            registry.compatible_versions(&inventory(), AcquisitionMode::ConsumerExport);
+        assert_eq!(
+            compatible
+                .iter()
+                .map(|parser| parser.version.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let exact = registry
+            .find_exact(
+                &ParserId {
+                    name: "chatgpt".to_owned(),
+                    version: "1.10".to_owned(),
+                },
+                &inventory(),
+                AcquisitionMode::ConsumerExport,
+            )
+            .expect("exact compatible compiled parser resolves");
+        let parsed = exact
+            .execute(ParserExecutionInput {
+                inventory: &inventory(),
+                artifacts: &[],
+            })
+            .expect("compiled parser executes");
+        assert_eq!(parsed.parser.version, "1.10");
+        assert!(matches!(
+            registry.select(&inventory(), AcquisitionMode::ConsumerExport),
+            ParserSelection::Ambiguous(identities) if identities.len() == 3
+        ));
+    }
 }

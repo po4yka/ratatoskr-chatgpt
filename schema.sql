@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.import_runs (
     account_ref     TEXT,
     acquisition_mode TEXT,
     media_type      TEXT,
+    parser_name     TEXT,
     parser_version  TEXT,
     schema_id       TEXT,
     state           TEXT NOT NULL CHECK (state IN ('received', 'hashed', 'stored', 'inspected', 'parsed', 'reconciled', 'completed', 'partial', 'failed', 'duplicate', 'quarantined')),
@@ -59,6 +60,9 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.import_runs (
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at     TIMESTAMPTZ
 );
+
+ALTER TABLE chatgpt_archive.import_runs
+    ADD COLUMN IF NOT EXISTS parser_name TEXT;
 
 -- Projects observed in exports; components arrive as later columns/tables, in place.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.projects (
@@ -166,6 +170,32 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.raw_records (
     recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Explicit many-to-many provenance. First/last-seen columns are projections;
+-- only these observations can prove that an entity remains evidenced by a
+-- retained raw export during scoped privacy deletion.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.export_entity_observations (
+    export_id      UUID NOT NULL REFERENCES chatgpt_archive.exports (id) ON DELETE CASCADE,
+    entity_kind    TEXT NOT NULL CHECK (entity_kind IN ('project', 'conversation', 'message', 'asset')),
+    entity_id      UUID NOT NULL,
+    observed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT export_observation_identity_unique UNIQUE (export_id, entity_kind, entity_id)
+);
+
+-- Extracted bytes remain separate from the immutable provider-original
+-- archive. Their ordinal is an internal identity and filenames never become
+-- storage paths or deletion-report fields.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.extracted_artifacts (
+    id                UUID PRIMARY KEY,
+    export_id         UUID NOT NULL REFERENCES chatgpt_archive.exports (id) ON DELETE CASCADE,
+    artifact_ordinal  INTEGER NOT NULL CHECK (artifact_ordinal >= 0),
+    artifact_kind     TEXT NOT NULL CHECK (artifact_kind IN ('entry', 'asset', 'manifest', 'unknown')),
+    blob_ref          JSONB NOT NULL,
+    sha256_hex        CHAR(64) NOT NULL,
+    byte_length       BIGINT NOT NULL CHECK (byte_length >= 0),
+    recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT extracted_artifact_identity_unique UNIQUE (export_id, artifact_ordinal)
+);
+
 -- What was and was not present in one import run.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.completeness_reports (
     id                UUID PRIMARY KEY,
@@ -183,7 +213,7 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.tombstones (
     id                UUID PRIMARY KEY,
     entity_table      TEXT NOT NULL,
     external_id       TEXT NOT NULL,
-    reason            TEXT NOT NULL CHECK (reason IN ('provider_deletion_event', 'compliance_event', 'reconciliation_policy', 'access_lost')),
+    reason            TEXT NOT NULL CHECK (reason IN ('provider_deletion_event', 'compliance_event', 'reconciliation_policy', 'access_lost', 'user_requested')),
     evidence_ref      TEXT NOT NULL,
     recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -193,11 +223,27 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_type      TEXT NOT NULL,
     aggregate_id    UUID NOT NULL,
+    tenant_id       UUID,
+    export_id       UUID REFERENCES chatgpt_archive.exports (id) ON DELETE CASCADE,
     payload         JSONB NOT NULL,
     correlation_id  UUID,
+    deduplication_key TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at    TIMESTAMPTZ
 );
+
+-- Existing development databases are disposable, but repeatable application
+-- of the one current definition still adds a newly declared nullable column.
+ALTER TABLE chatgpt_archive.outbox_events
+    ADD COLUMN IF NOT EXISTS deduplication_key TEXT;
+ALTER TABLE chatgpt_archive.outbox_events
+    ADD COLUMN IF NOT EXISTS tenant_id UUID;
+ALTER TABLE chatgpt_archive.outbox_events
+    ADD COLUMN IF NOT EXISTS export_id UUID;
+
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_deduplication_key_unique
+    ON chatgpt_archive.outbox_events (deduplication_key)
+    WHERE deduplication_key IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_report_once
     ON chatgpt_archive.outbox_events (event_type, aggregate_id)
@@ -209,8 +255,98 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.inbox_events (
     source        TEXT NOT NULL,
     event_type    TEXT NOT NULL,
     event_key     TEXT NOT NULL,
+    tenant_id     UUID,
+    export_id     UUID REFERENCES chatgpt_archive.exports (id) ON DELETE CASCADE,
     payload       JSONB NOT NULL,
     received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     processed_at  TIMESTAMPTZ,
     UNIQUE (source, event_type, event_key)
+);
+
+ALTER TABLE chatgpt_archive.inbox_events
+    ADD COLUMN IF NOT EXISTS tenant_id UUID;
+ALTER TABLE chatgpt_archive.inbox_events
+    ADD COLUMN IF NOT EXISTS export_id UUID;
+
+-- Durable, tenant-owned privacy workflow state. The tenant identity remains
+-- after tenant erasure as an opaque internal UUID, so these rows deliberately
+-- do not reference the account row that the operation may delete.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.privacy_deletion_requests (
+    id                 UUID PRIMARY KEY,
+    tenant_id          UUID NOT NULL,
+    scope_kind         TEXT NOT NULL CHECK (scope_kind IN ('archive', 'conversation', 'tenant')),
+    scope_id           UUID,
+    status             TEXT NOT NULL CHECK (status IN ('planned', 'purging', 'finalizing', 'completed', 'failed')),
+    correlation_id     UUID,
+    completion_report  JSONB,
+    error_code         TEXT,
+    requested_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at       TIMESTAMPTZ,
+    CONSTRAINT privacy_deletion_scope_shape CHECK (
+        (scope_kind = 'tenant' AND scope_id IS NULL)
+        OR (scope_kind IN ('archive', 'conversation') AND scope_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS chatgpt_archive.privacy_deletion_items (
+    request_id     UUID NOT NULL REFERENCES chatgpt_archive.privacy_deletion_requests (id) ON DELETE CASCADE,
+    ordinal        INTEGER NOT NULL CHECK (ordinal >= 0),
+    category       TEXT NOT NULL,
+    opaque_id      TEXT NOT NULL,
+    action         TEXT NOT NULL CHECK (action IN ('erase', 'remove', 'retain_shared', 'retain_evidenced', 'emit_tombstone')),
+    state          TEXT NOT NULL DEFAULT 'planned' CHECK (state IN ('planned', 'purged', 'retained', 'finalized', 'failed')),
+    blob_ref       JSONB,
+    error_code     TEXT,
+    PRIMARY KEY (request_id, ordinal),
+    CONSTRAINT privacy_deletion_request_item_identity_unique UNIQUE (request_id, category, opaque_id, action)
+);
+
+CREATE TABLE IF NOT EXISTS chatgpt_archive.privacy_deletion_audits (
+    id               UUID PRIMARY KEY,
+    request_id       UUID NOT NULL REFERENCES chatgpt_archive.privacy_deletion_requests (id),
+    tenant_id        UUID NOT NULL,
+    scope_kind       TEXT NOT NULL CHECK (scope_kind IN ('archive', 'conversation', 'tenant')),
+    category_counts  JSONB NOT NULL,
+    outcome          TEXT NOT NULL CHECK (outcome IN ('completed', 'failed')),
+    evidence_ref     JSONB NOT NULL,
+    correlation_id   UUID,
+    completed_at     TIMESTAMPTZ NOT NULL,
+    CONSTRAINT privacy_deletion_audit_request_unique UNIQUE (request_id)
+);
+
+-- Applied reparse results are immutable and keyed by every input fingerprint.
+-- Dry runs never insert here.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.reparse_runs (
+    id                            UUID PRIMARY KEY,
+    tenant_id                     UUID NOT NULL,
+    export_id                     UUID NOT NULL REFERENCES chatgpt_archive.exports (id),
+    parser_name                   TEXT NOT NULL,
+    parser_version                TEXT NOT NULL,
+    raw_sha256_hex                CHAR(64) NOT NULL,
+    registry_fingerprint          CHAR(64) NOT NULL,
+    input_projection_fingerprint  CHAR(64) NOT NULL,
+    status                        TEXT NOT NULL CHECK (status IN ('applied', 'unchanged', 'failed')),
+    report                        JSONB NOT NULL,
+    correlation_id                UUID,
+    started_at                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at                  TIMESTAMPTZ,
+    CONSTRAINT reparse_execution_identity_unique UNIQUE (
+        export_id, parser_name, parser_version, raw_sha256_hex,
+        registry_fingerprint, input_projection_fingerprint
+    )
+);
+
+CREATE TABLE IF NOT EXISTS chatgpt_archive.parser_migration_reports (
+    id                    UUID PRIMARY KEY,
+    tenant_id             UUID NOT NULL,
+    operation_key         UUID NOT NULL,
+    parser_name           TEXT NOT NULL,
+    parser_version        TEXT NOT NULL,
+    dry_run               BOOLEAN NOT NULL,
+    status                TEXT NOT NULL CHECK (status IN ('planned', 'completed', 'partial', 'failed')),
+    report                JSONB NOT NULL,
+    correlation_id        UUID,
+    started_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at          TIMESTAMPTZ,
+    CONSTRAINT parser_migration_operation_identity_unique UNIQUE (tenant_id, operation_key)
 );

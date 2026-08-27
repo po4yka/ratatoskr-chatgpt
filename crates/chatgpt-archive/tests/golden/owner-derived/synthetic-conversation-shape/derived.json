@@ -1,0 +1,11 @@
+{
+  "shape": "conversation",
+  "variants": [
+    "text",
+    "unknown"
+  ],
+  "relationships": {
+    "branches": 1,
+    "orphans": 0
+  }
+}

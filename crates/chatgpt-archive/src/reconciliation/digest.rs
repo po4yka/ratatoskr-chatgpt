@@ -10,7 +10,7 @@ use crate::{
     ParsedCanvasDocument, ParsedConversation, ParsedInstruction, ParsedMessage, ParsedProject,
 };
 
-pub(super) fn conversation_digest(conversation: &ParsedConversation) -> String {
+pub(crate) fn conversation_digest(conversation: &ParsedConversation) -> String {
     let mut messages = conversation.messages.iter().collect::<Vec<_>>();
     messages.sort_by(|left, right| left.external_id.cmp(&right.external_id));
     digest(&json!({
