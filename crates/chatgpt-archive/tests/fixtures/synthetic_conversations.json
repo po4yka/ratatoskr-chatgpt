@@ -1,0 +1,59 @@
+[
+  {
+    "id": "conversation-alpha",
+    "title": "Synthetic alpha",
+    "create_time": 1.0,
+    "update_time": 2.0,
+    "conversation_unknown": { "retained": true },
+    "mapping": {
+      "message-user": {
+        "id": "message-user",
+        "parent": null,
+        "message": {
+          "id": "message-user",
+          "author": { "role": "user" },
+          "create_time": 1.1,
+          "content": { "parts": ["Hello archive"] }
+        }
+      },
+      "message-assistant": {
+        "id": "message-assistant",
+        "parent": "message-user",
+        "message": {
+          "id": "message-assistant",
+          "author": { "role": "assistant", "author_unknown": "keep" },
+          "create_time": 1.2,
+          "metadata": { "model_slug": "synthetic-model", "meta_unknown": 7 },
+          "message_unknown": ["preserve"],
+          "content": {
+            "parts": [
+              { "kind": "tool_call", "name": "lookup", "arguments": { "q": "weather" } },
+              { "kind": "media_reference", "asset_id": "image-1", "mime_type": "image/png" },
+              { "kind": "future_part", "payload": [1, 2, 3] }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "conversation-beta",
+    "title": null,
+    "mapping": {
+      "message-tool": {
+        "id": "message-tool",
+        "parent": null,
+        "message": {
+          "id": "message-tool",
+          "author": { "role": "tool" },
+          "content": {
+            "parts": [
+              { "kind": "tool_result", "tool_call_id": "call-1", "result": "sunny" },
+              { "kind": "media_reference", "asset_id": "file-1", "mime_type": "text/csv" }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

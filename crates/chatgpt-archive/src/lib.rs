@@ -13,8 +13,10 @@
 //! by per-tenant digest, and a durable resumable import state machine. Safe
 //! archive inspection and bounded extraction now preserve every accepted entry
 //! through immutable `BlobRefs`, while parser registration selects a supported
-//! version from structural evidence without parsing it. Graph reconciliation
-//! and portable exports arrive with later implementation plan items.
+//! version from structural evidence. A narrow synthetic conversations parser
+//! produces deterministic, loss-aware records without claiming real-export
+//! support; graph reconciliation and portable exports arrive with later plan
+//! items.
 
 pub mod config;
 
@@ -49,8 +51,14 @@ pub use persistence::{Database, PersistenceError};
 
 pub mod parser_registry;
 pub mod receipt;
+pub mod synthetic_parser;
 pub use parser_registry::{
     ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
+};
+pub use synthetic_parser::{
+    ContentPartKind, MessageRole, ParsedContentPart, ParsedConversation, ParsedConversations,
+    ParsedMessage, RawRecord, SYNTHETIC_PARSER_NAME, SYNTHETIC_PARSER_VERSION, SYNTHETIC_SCHEMA_ID,
+    SyntheticConversationsParser, SyntheticParserError,
 };
 
 #[cfg(feature = "test-support")]
