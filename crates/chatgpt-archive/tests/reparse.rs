@@ -147,6 +147,22 @@ fn count_files(path: &std::path::Path) -> usize {
     })
 }
 
+async fn archive_row_counts(
+    database: &Database,
+    export_id: Uuid,
+) -> Result<(i64, i64, i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT
+          (SELECT count(*) FROM chatgpt_archive.reparse_runs WHERE export_id = $1),
+          (SELECT count(*) FROM chatgpt_archive.revisions WHERE observed_in = $1),
+          (SELECT count(*) FROM chatgpt_archive.extracted_artifacts WHERE export_id = $1),
+          (SELECT count(*) FROM chatgpt_archive.outbox_events WHERE export_id = $1)",
+    )
+    .bind(export_id)
+    .fetch_one(database.pool())
+    .await
+}
+
 #[tokio::test]
 async fn reparse_dry_run_matches_immediate_apply_without_writes()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -194,15 +210,7 @@ async fn reparse_dry_run_matches_immediate_apply_without_writes()
         Arc::new(FixedParser { version: "2.0" }),
     )?;
     let engine = ReparseEngine::new(database.pool().clone(), blobs, Arc::new(registry), limits());
-    let before_rows: (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT
-          (SELECT count(*) FROM chatgpt_archive.reparse_runs),
-          (SELECT count(*) FROM chatgpt_archive.revisions),
-          (SELECT count(*) FROM chatgpt_archive.extracted_artifacts),
-          (SELECT count(*) FROM chatgpt_archive.outbox_events)",
-    )
-    .fetch_one(database.pool())
-    .await?;
+    let before_rows = archive_row_counts(&database, export_id).await?;
     let before_files = count_files(root.path());
     let plan = engine
         .plan(
@@ -214,15 +222,7 @@ async fn reparse_dry_run_matches_immediate_apply_without_writes()
             },
         )
         .await?;
-    let after_dry_rows: (i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT
-          (SELECT count(*) FROM chatgpt_archive.reparse_runs),
-          (SELECT count(*) FROM chatgpt_archive.revisions),
-          (SELECT count(*) FROM chatgpt_archive.extracted_artifacts),
-          (SELECT count(*) FROM chatgpt_archive.outbox_events)",
-    )
-    .fetch_one(database.pool())
-    .await?;
+    let after_dry_rows = archive_row_counts(&database, export_id).await?;
     assert_eq!(before_rows, after_dry_rows, "dry-run must write no row");
     assert_eq!(
         before_files,
