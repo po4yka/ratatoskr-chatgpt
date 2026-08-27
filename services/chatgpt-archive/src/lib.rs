@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ratatoskr_chatgpt_archive::admin::{RuntimeState, admin_router};
 use ratatoskr_chatgpt_archive::config::Config;
@@ -19,11 +20,13 @@ use ratatoskr_chatgpt_archive::persistence::{Database, PersistenceError};
 use ratatoskr_chatgpt_archive::portable_export::{
     PortableArchiveExporter, PortableExportError, PortableExportFilter,
 };
+use ratatoskr_chatgpt_archive::receipt::OperationReportOutbox;
 use ratatoskr_chatgpt_archive::receipt::ReceiptError;
 use ratatoskr_chatgpt_archive::receipt::auth::ConfigTenantAuthenticator;
 use ratatoskr_chatgpt_archive::receipt::http::{ReceiptApiState, router as receipt_router};
 use ratatoskr_chatgpt_archive::receipt::pg::PostgresReceiptRepository;
 use ratatoskr_chatgpt_archive::{ArchiveReceiver, BlobStore, init_telemetry};
+use secrecy::ExposeSecret as _;
 
 /// Parsed `portable-export` command arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +153,31 @@ async fn shutdown_signal() {
     }
 }
 
+/// Runs bounded publication passes until the owning service starts shutdown.
+async fn operation_report_loop(
+    outbox: OperationReportOutbox,
+    endpoint: String,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        if *stopped.borrow() {
+            return;
+        }
+        if outbox.publish_pending_once(&endpoint).await.is_err() {
+            metrics::counter!("chatgpt_archive_operation_report_publications_total", "outcome" => "failed")
+                .increment(1);
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(2)) => {},
+            changed = stopped.changed() => {
+                if changed.is_err() || *stopped.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Runs the service to completion.
 ///
 /// # Errors
@@ -168,6 +196,8 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     );
 
     let state = Arc::new(RuntimeState::new());
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut outbox_task = None;
 
     // Prepare the archive root before anything can write into it.
     let root = config
@@ -205,10 +235,22 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
                 tracing::info!(runs = swept, "swept interrupted import runs");
             }
             let authenticator = Arc::new(ConfigTenantAuthenticator::from_config(&config.receipt));
-            public_routes = Some(receipt_router(Arc::new(ReceiptApiState::new(
-                receiver,
-                authenticator,
-            ))));
+            public_routes = Some(receipt_router(Arc::new(
+                ReceiptApiState::new_with_platform_account_ids(
+                    receiver,
+                    authenticator,
+                    &config.receipt.platform_accounts,
+                ),
+            )));
+        }
+
+        if let Some(endpoint) = config.receipt.event_bus_url.as_ref() {
+            let endpoint = endpoint.expose_secret().to_owned();
+            let outbox = OperationReportOutbox::new(database.pool().clone());
+            let stopped = shutdown_rx.clone();
+            outbox_task = Some(tokio::spawn(operation_report_loop(
+                outbox, endpoint, stopped,
+            )));
         }
     }
 
@@ -229,9 +271,20 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        })
         .await
         .map_err(ServiceError::Serve)?;
+
+    if let Some(task) = outbox_task {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(config.limits.shutdown_timeout_ms),
+            task,
+        )
+        .await;
+    }
 
     Ok(())
 }

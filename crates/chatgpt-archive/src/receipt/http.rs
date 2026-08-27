@@ -5,6 +5,7 @@
 //! the single error-envelope site. No archive byte, filename, or digest
 //! fragment ever reaches a log line.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -15,12 +16,18 @@ use axum::routing::post;
 use axum::{Json, extract::State};
 use futures_util::TryStreamExt as _;
 
-use super::auth::TenantAuthenticator;
-use super::{AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome};
+use super::auth::{TenantAuthenticator, TenantPrincipal};
+use super::{AcquisitionMode, ArchiveReceiver, PlatformOperation, ReceiptError, ReceiptOutcome};
 use crate::error::{ArchiveError, FailureKind, Subsystem};
 
 /// The acquisition-mode header the client must declare.
 pub const HEADER_ACQUISITION: &str = "x-ratatoskr-acquisition";
+const HEADER_PLATFORM_USER_ID: &str = "x-ratatoskr-user-id";
+const HEADER_PLATFORM_DEVICE_ID: &str = "x-ratatoskr-device-id";
+const HEADER_CORRELATION_ID: &str = "x-correlation-id";
+const HEADER_OPERATION_ID: &str = "x-ratatoskr-operation-id";
+const HEADER_ARCHIVE_SHA256: &str = "x-ratatoskr-archive-sha256";
+const HEADER_ARCHIVE_BYTE_SIZE: &str = "x-ratatoskr-archive-byte-size";
 
 /// What the receipt answers with on success.
 #[derive(Debug, serde::Serialize)]
@@ -40,6 +47,7 @@ pub struct ReceiptAnswer {
 pub struct ReceiptApiState {
     receiver: ArchiveReceiver,
     authenticator: Arc<dyn TenantAuthenticator>,
+    platform_accounts: HashMap<uuid::Uuid, TenantPrincipal>,
 }
 
 impl ReceiptApiState {
@@ -49,6 +57,62 @@ impl ReceiptApiState {
         Self {
             receiver,
             authenticator,
+            platform_accounts: HashMap::new(),
+        }
+    }
+
+    /// Binds receipt state with the configured Platform-to-account mappings.
+    #[must_use]
+    pub fn new_with_platform_accounts<I>(
+        receiver: ArchiveReceiver,
+        authenticator: Arc<dyn TenantAuthenticator>,
+        accounts: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (&'static str, &'static str)>,
+    {
+        let platform_accounts = accounts
+            .into_iter()
+            .filter_map(|(user, account)| {
+                user.parse::<uuid::Uuid>().ok().map(|user_id| {
+                    (
+                        user_id,
+                        TenantPrincipal {
+                            account_external_ref: account.to_owned(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        Self {
+            receiver,
+            authenticator,
+            platform_accounts,
+        }
+    }
+
+    /// Binds receipt state from validated Platform-user account mappings.
+    #[must_use]
+    pub fn new_with_platform_account_ids(
+        receiver: ArchiveReceiver,
+        authenticator: Arc<dyn TenantAuthenticator>,
+        accounts: &[(uuid::Uuid, String)],
+    ) -> Self {
+        let platform_accounts = accounts
+            .iter()
+            .map(|(user_id, account)| {
+                (
+                    *user_id,
+                    TenantPrincipal {
+                        account_external_ref: account.clone(),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            receiver,
+            authenticator,
+            platform_accounts,
         }
     }
 }
@@ -57,7 +121,88 @@ impl ReceiptApiState {
 pub fn router(state: Arc<ReceiptApiState>) -> Router {
     Router::new()
         .route("/exports", post(create_export))
+        .route("/v1/ai-archives/receipt", post(receive_platform_archive))
         .with_state(state)
+}
+
+/// The trusted, loopback-only receipt Platform calls after device authentication.
+async fn receive_platform_archive(
+    State(state): State<Arc<ReceiptApiState>>,
+    headers: axum::http::HeaderMap,
+    body: Body,
+) -> Response {
+    if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        return crate::fault::reject(FailureKind::Unauthenticated);
+    }
+    let Some((principal, expected_sha256, expected_size, operation)) =
+        platform_claims(&state, &headers)
+    else {
+        return crate::fault::reject(FailureKind::Unauthenticated);
+    };
+    let Some(media_type) = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return crate::fault::reject(FailureKind::InvalidRequest);
+    };
+    let stream = http_body_util::BodyStream::new(body).map_ok(|frame| match frame.into_data() {
+        Ok(data) => data,
+        Err(_) => bytes::Bytes::new(),
+    });
+    match state
+        .receiver
+        .receive_platform_archive(
+            &principal,
+            media_type,
+            expected_size,
+            &expected_sha256,
+            operation,
+            stream,
+        )
+        .await
+    {
+        Ok(ReceiptOutcome::Stored { .. } | ReceiptOutcome::Duplicate { .. }) => {
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(error) => respond(error),
+    }
+}
+
+fn platform_claims(
+    state: &ReceiptApiState,
+    headers: &axum::http::HeaderMap,
+) -> Option<(TenantPrincipal, String, u64, PlatformOperation)> {
+    let parse = |name: &'static str| headers.get(name)?.to_str().ok();
+    let user_id = parse(HEADER_PLATFORM_USER_ID)?.parse::<uuid::Uuid>().ok()?;
+    let _device_id = parse(HEADER_PLATFORM_DEVICE_ID)?
+        .parse::<uuid::Uuid>()
+        .ok()?;
+    let correlation = parse(HEADER_CORRELATION_ID)?;
+    let operation_id = parse(HEADER_OPERATION_ID)?.parse::<uuid::Uuid>().ok()?;
+    let sha256 = parse(HEADER_ARCHIVE_SHA256)?;
+    let byte_size = parse(HEADER_ARCHIVE_BYTE_SIZE)?.parse::<u64>().ok()?;
+    if correlation.is_empty()
+        || correlation.len() > 200
+        || byte_size == 0
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    state
+        .platform_accounts
+        .get(&user_id)
+        .cloned()
+        .map(|principal| {
+            (
+                principal,
+                sha256.to_owned(),
+                byte_size,
+                PlatformOperation { operation_id },
+            )
+        })
 }
 
 /// The one place a receipt failure becomes an HTTP response.
@@ -69,7 +214,9 @@ fn respond(error: ReceiptError) -> Response {
         ReceiptError::DeclaredSizeExceeded | ReceiptError::StreamOvergrown => {
             FailureKind::PayloadTooLarge
         }
-        ReceiptError::InvalidMediaType => FailureKind::InvalidRequest,
+        ReceiptError::InvalidMediaType | ReceiptError::DigestMismatch => {
+            FailureKind::InvalidRequest
+        }
         ReceiptError::Repository(inner) => return internal_envelope(inner),
         ReceiptError::Storage(io) => return internal_envelope(io),
         other @ (ReceiptError::StreamFailed(_) | ReceiptError::StagingEvidenceLost) => {
@@ -158,6 +305,7 @@ fn answer(outcome: ReceiptOutcome) -> Response {
             export_id,
             sha256_hex,
             byte_length,
+            ..
         } => (
             StatusCode::CREATED,
             Json(ReceiptAnswer {

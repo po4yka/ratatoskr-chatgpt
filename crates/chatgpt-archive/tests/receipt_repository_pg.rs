@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use ratatoskr_chatgpt_archive::receipt::AcquisitionMode;
 use ratatoskr_chatgpt_archive::receipt::pg::PostgresReceiptRepository;
-use ratatoskr_chatgpt_archive::receipt::repository::{ReceiptRepository as _, RepositoryError};
+use ratatoskr_chatgpt_archive::receipt::repository::{
+    PublishRequest, ReceiptRepository as _, RepositoryError,
+};
 use ratatoskr_chatgpt_archive::receipt::state::ImportState;
 
 const MEDIA_TYPE: &str = "application/zip";
@@ -136,7 +138,8 @@ async fn duplicate_lookup_scopes_by_account() -> Result<(), Box<dyn std::error::
             .await?;
     }
     let digest = "c".repeat(64);
-    sqlx::query("INSERT INTO chatgpt_archive.exports (id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length) VALUES ($1, $2, 'consumer_export', '{}', $3, 5)")
+    sqlx::query("INSERT INTO chatgpt_archive.exports (id, ai_archive_id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length) VALUES ($1, $2, $3, 'consumer_export', '{}', $4, 5)")
+        .bind(Uuid::now_v7())
         .bind(Uuid::now_v7())
         .bind(account_a)
         .bind(&digest)
@@ -177,35 +180,37 @@ async fn record_export_persists_reference_digest_and_link() -> Result<(), Box<dy
         "media_type": MEDIA_TYPE,
         "length_bytes": 77
     });
-    let export_id = repository
-        .publish_export(
+    let export = repository
+        .publish_export(PublishRequest {
             run_id,
-            &account_ref,
-            &AcquisitionMode::ConsumerExport,
-            blob_ref,
-            digest.clone(),
-            77,
-        )
+            account_external_ref: account_ref.clone(),
+            mode: AcquisitionMode::ConsumerExport,
+            blob_ref_json: blob_ref,
+            sha256_hex: digest.clone(),
+            byte_length: 77,
+            platform_operation: None,
+        })
         .await?;
 
     let stored = repository.load_run(run_id).await?.expect("run exists");
     assert_eq!(stored.state, ImportState::Stored);
-    assert_eq!(stored.export_id, Some(export_id));
+    assert_eq!(stored.export_id, Some(export.export_id));
 
     // A second publish of the same tenant digest names the existing row.
     let second = repository
-        .publish_export(
+        .publish_export(PublishRequest {
             run_id,
-            &account_ref,
-            &AcquisitionMode::ConsumerExport,
-            serde_json::json!({}),
-            digest,
-            77,
-        )
+            account_external_ref: account_ref,
+            mode: AcquisitionMode::ConsumerExport,
+            blob_ref_json: serde_json::json!({}),
+            sha256_hex: digest,
+            byte_length: 77,
+            platform_operation: None,
+        })
         .await;
     match second {
         Err(RepositoryError::DuplicateExisting { existing_export_id }) => {
-            assert_eq!(existing_export_id, export_id);
+            assert_eq!(existing_export_id, export.export_id);
         }
         other => panic!("expected an explicit duplicate outcome, got {other:?}"),
     }

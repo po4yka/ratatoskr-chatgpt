@@ -11,7 +11,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::AcquisitionMode;
-use super::repository::{ReceiptRepository, RepoFuture, RepositoryError, RunRecord};
+use super::report::raw_stored_partial;
+use super::repository::{
+    PublishRequest, PublishedExport, ReceiptRepository, RepoFuture, RepositoryError, RunRecord,
+};
 use super::state::ImportState;
 
 /// The receipt seam backed by the owned `chatgpt_archive` schema.
@@ -238,16 +241,16 @@ impl ReceiptRepository for PostgresReceiptRepository {
 
     fn publish_export(
         &self,
-        run_id: Uuid,
-        account_external_ref: &str,
-        mode: &AcquisitionMode,
-        blob_ref_json: serde_json::Value,
-        sha256_hex: String,
-        byte_length: u64,
-    ) -> RepoFuture<Result<Uuid, RepositoryError>> {
+        request: PublishRequest,
+    ) -> RepoFuture<Result<PublishedExport, RepositoryError>> {
         let pool = self.pool.clone();
-        let account = account_external_ref.to_owned();
-        let mode_spelling = mode.as_str().to_owned();
+        let account = request.account_external_ref;
+        let mode_spelling = request.mode.as_str().to_owned();
+        let run_id = request.run_id;
+        let blob_ref_json = request.blob_ref_json;
+        let sha256_hex = request.sha256_hex;
+        let byte_length = request.byte_length;
+        let platform_operation = request.platform_operation;
         Box::pin(async move {
             let mut transaction = pool.begin().await.map_err(backend)?;
 
@@ -276,10 +279,12 @@ impl ReceiptRepository for PostgresReceiptRepository {
             }
 
             let export_id = Uuid::now_v7();
+            let ai_archive_id = Uuid::now_v7();
             sqlx::query(
-                "INSERT INTO chatgpt_archive.exports (id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length, import_started_at) VALUES ($1, $2, $3, $4, $5, $6, now())",
+                "INSERT INTO chatgpt_archive.exports (id, ai_archive_id, account_id, acquisition_mode, blob_ref, sha256_hex, byte_length, import_started_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now())",
             )
             .bind(export_id)
+            .bind(ai_archive_id)
             .bind(owner.0)
             .bind(&mode_spelling)
             .bind(&blob_ref_json)
@@ -301,8 +306,23 @@ impl ReceiptRepository for PostgresReceiptRepository {
                 return Err(RepositoryError::Conflict);
             }
 
+            if let Some(operation) = platform_operation {
+                let report = raw_stored_partial(operation, ai_archive_id)?;
+                sqlx::query(
+                    "INSERT INTO chatgpt_archive.outbox_events (event_type, aggregate_id, payload) VALUES ('platform.operation.reported.v1', $1, $2)",
+                )
+                .bind(operation.operation_id)
+                .bind(report)
+                .execute(&mut *transaction)
+                .await
+                .map_err(backend)?;
+            }
+
             transaction.commit().await.map_err(backend)?;
-            Ok(export_id)
+            Ok(PublishedExport {
+                export_id,
+                ai_archive_id,
+            })
         })
     }
 }

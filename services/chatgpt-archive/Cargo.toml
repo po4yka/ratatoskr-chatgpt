@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
+metrics.workspace = true
 ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive" }
 secrecy.workspace = true
 serde.workspace = true

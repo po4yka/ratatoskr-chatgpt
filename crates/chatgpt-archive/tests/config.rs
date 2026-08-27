@@ -156,6 +156,20 @@ fn absolute_staging_root_loads() {
     );
 }
 
+/// The receipt publisher gets its broker endpoint only from the closed,
+/// explicit configuration surface.
+#[test]
+fn event_bus_url_loads_without_rendering_its_value() {
+    let config = Config::from_environment(entries(&[
+        ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        ("RATATOSKR__RECEIPT__EVENT_BUS_URL", "nats://127.0.0.1:4222"),
+    ]))
+    .expect("a NATS endpoint must load");
+
+    assert!(config.receipt.event_bus_url.is_some());
+    assert!(!format!("{:?}", config.receipt).contains("127.0.0.1:4222"));
+}
+
 /// Tenant tokens parse into their token-and-account pairs.
 #[test]
 fn tenant_tokens_parse_into_secret_pairs() {
@@ -177,6 +191,30 @@ fn tenant_tokens_parse_into_secret_pairs() {
     assert_eq!(
         pairs,
         vec![("tok-alpha", "acc-one"), ("tok-beta", "acc-two")]
+    );
+}
+
+/// Platform identities are an explicit local routing map, never inferred
+/// from a caller's arbitrary UUID at receipt time.
+#[test]
+fn platform_account_mappings_parse_as_uuid_to_account_pairs() {
+    let config = Config::from_environment(entries(&[
+        ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        (
+            "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS",
+            "00000000-0000-0000-0000-000000000011=acc-one",
+        ),
+    ]))
+    .expect("one explicit Platform account mapping must load");
+
+    assert_eq!(
+        config.receipt.platform_accounts,
+        vec![(
+            "00000000-0000-0000-0000-000000000011"
+                .parse()
+                .expect("uuid"),
+            "acc-one".to_owned()
+        )]
     );
 }
 

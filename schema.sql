@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.accounts (
 -- separate exports while BlobStore deduplicates storage by content address.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.exports (
     id                UUID PRIMARY KEY,
+    ai_archive_id     UUID NOT NULL,
     account_id        UUID NOT NULL REFERENCES chatgpt_archive.accounts (id),
     acquisition_mode  TEXT NOT NULL CHECK (acquisition_mode IN ('consumer_export', 'edu_export', 'compliance_log', 'manual_capture', 'legacy_import')),
     blob_ref          JSONB NOT NULL,
@@ -197,6 +198,10 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at    TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_report_once
+    ON chatgpt_archive.outbox_events (event_type, aggregate_id)
+    WHERE event_type = 'platform.operation.reported.v1';
 
 -- Inbox deduplication: event identity seen from other bounded contexts.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.inbox_events (

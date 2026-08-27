@@ -15,6 +15,42 @@ use uuid::Uuid;
 use super::AcquisitionMode;
 use super::state::ImportState;
 
+/// A Platform operation awaiting exactly one terminal receipt report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformOperation {
+    /// Platform identity supplied through the private receipt boundary.
+    pub operation_id: Uuid,
+}
+
+/// Identities atomically created when raw archive evidence becomes durable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedExport {
+    /// The local raw-evidence row.
+    pub export_id: Uuid,
+    /// The separate Ratatoskr archive-import identity.
+    pub ai_archive_id: Uuid,
+}
+
+/// All values that become durable with one raw export and its optional
+/// Platform operation report.
+#[derive(Debug)]
+pub struct PublishRequest {
+    /// The already-hashed receipt run.
+    pub run_id: Uuid,
+    /// Account that owns the raw evidence.
+    pub account_external_ref: String,
+    /// Acquisition authority of this receipt.
+    pub mode: AcquisitionMode,
+    /// Content-addressed blob reference for the immutable bytes.
+    pub blob_ref_json: serde_json::Value,
+    /// Verified lowercase SHA-256 hex.
+    pub sha256_hex: String,
+    /// Verified streamed byte count.
+    pub byte_length: u64,
+    /// The Platform operation to report, if this was a Platform receipt.
+    pub platform_operation: Option<PlatformOperation>,
+}
+
 /// Why a persistence operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -113,11 +149,6 @@ pub trait ReceiptRepository: core::fmt::Debug + Send + Sync {
     /// [`RepositoryError::DuplicateExisting`].
     fn publish_export(
         &self,
-        run_id: Uuid,
-        account_external_ref: &str,
-        mode: &AcquisitionMode,
-        blob_ref_json: serde_json::Value,
-        sha256_hex: String,
-        byte_length: u64,
-    ) -> RepoFuture<Result<Uuid, RepositoryError>>;
+        request: PublishRequest,
+    ) -> RepoFuture<Result<PublishedExport, RepositoryError>>;
 }

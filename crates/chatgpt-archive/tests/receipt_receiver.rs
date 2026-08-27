@@ -164,6 +164,7 @@ async fn chunked_upload_hashes_incrementally_and_records_verified_evidence() {
         export_id,
         sha256_hex,
         byte_length,
+        ..
     } = outcome.expect("a healthy upload must be stored")
     else {
         panic!("first receipt of fresh content must be stored");
@@ -400,6 +401,7 @@ async fn hashed_run_resumes_to_stored_without_new_bytes() {
         export_id,
         sha256_hex,
         byte_length,
+        ..
     }) = outcome
     else {
         panic!("hashed resume must reach stored");

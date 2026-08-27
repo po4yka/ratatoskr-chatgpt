@@ -6,13 +6,19 @@
 
 pub mod auth;
 pub mod http;
+pub mod outbox;
 pub mod pg;
+pub(crate) mod report;
 pub mod repository;
 pub mod state;
 
 use crate::receipt::state::ImportState;
 
-pub use repository::{ReceiptRepository, RepositoryError, RunRecord};
+pub use outbox::OperationReportOutbox;
+pub use repository::{
+    PlatformOperation, PublishRequest, PublishedExport, ReceiptRepository, RepositoryError,
+    RunRecord,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -74,6 +80,8 @@ pub enum ReceiptOutcome {
     Stored {
         /// The fresh export identity.
         export_id: Uuid,
+        /// Separately minted Ratatoskr archive-import identity.
+        ai_archive_id: Uuid,
         /// The lowercase SHA-256 hex of the received bytes.
         sha256_hex: String,
         /// Total bytes received.
@@ -128,6 +136,9 @@ pub enum ReceiptError {
     /// The declared media type is not `type/subtype`.
     #[error("the declared media type is invalid")]
     InvalidMediaType,
+    /// The streamed bytes differ from the trusted archive digest.
+    #[error("the received archive digest did not match the declared identity")]
+    DigestMismatch,
 }
 
 /// Streaming archive receiver.
@@ -141,6 +152,38 @@ pub struct ArchiveReceiver {
     repository: Arc<dyn ReceiptRepository>,
     staging_root: PathBuf,
     max_archive_bytes: u64,
+}
+
+/// Trusted expectations attached to one receipt after its boundary validated
+/// Platform claims. Keeping them together prevents a new trusted claim from
+/// becoming another positional parameter in the streaming state machine.
+#[derive(Debug, Clone, Copy)]
+struct ReceiptExpectations<'a> {
+    expected_sha256_hex: Option<&'a str>,
+    platform_operation: Option<PlatformOperation>,
+}
+
+impl<'a> ReceiptExpectations<'a> {
+    const fn none() -> Self {
+        Self {
+            expected_sha256_hex: None,
+            platform_operation: None,
+        }
+    }
+
+    const fn with_digest(expected_sha256_hex: &'a str) -> Self {
+        Self {
+            expected_sha256_hex: Some(expected_sha256_hex),
+            platform_operation: None,
+        }
+    }
+
+    const fn platform(expected_sha256_hex: &'a str, operation: PlatformOperation) -> Self {
+        Self {
+            expected_sha256_hex: Some(expected_sha256_hex),
+            platform_operation: Some(operation),
+        }
+    }
 }
 
 impl ArchiveReceiver {
@@ -206,6 +249,90 @@ impl ArchiveReceiver {
         S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.receive_inner(
+            principal,
+            mode,
+            media_type,
+            declared_length,
+            ReceiptExpectations::none(),
+            stream,
+        )
+        .await
+    }
+
+    /// Receives one archive after a trusted boundary fixed its digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReceiptError::DigestMismatch`] before raw publication when
+    /// bytes disagree with the declared archive identity.
+    pub async fn receive_with_expected_digest<S, E>(
+        &self,
+        principal: &crate::receipt::auth::TenantPrincipal,
+        mode: AcquisitionMode,
+        media_type: &str,
+        declared_length: Option<u64>,
+        expected_sha256_hex: &str,
+        stream: S,
+    ) -> Result<ReceiptOutcome, ReceiptError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.receive_inner(
+            principal,
+            mode,
+            media_type,
+            declared_length,
+            ReceiptExpectations::with_digest(expected_sha256_hex),
+            stream,
+        )
+        .await
+    }
+
+    /// Receives Platform-forwarded bytes and writes its terminal report into the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReceiptError`] when claims, bytes, storage, or durable
+    /// reporting cannot be completed safely.
+    pub async fn receive_platform_archive<S, E>(
+        &self,
+        principal: &crate::receipt::auth::TenantPrincipal,
+        media_type: &str,
+        declared_length: u64,
+        expected_sha256_hex: &str,
+        operation: PlatformOperation,
+        stream: S,
+    ) -> Result<ReceiptOutcome, ReceiptError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.receive_inner(
+            principal,
+            AcquisitionMode::ConsumerExport,
+            media_type,
+            Some(declared_length),
+            ReceiptExpectations::platform(expected_sha256_hex, operation),
+            stream,
+        )
+        .await
+    }
+
+    async fn receive_inner<S, E>(
+        &self,
+        principal: &crate::receipt::auth::TenantPrincipal,
+        mode: AcquisitionMode,
+        media_type: &str,
+        declared_length: Option<u64>,
+        expectations: ReceiptExpectations<'_>,
+        stream: S,
+    ) -> Result<ReceiptOutcome, ReceiptError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         ratatoskr_identifiers::MediaType::parse(media_type)
             .map_err(|_| ReceiptError::InvalidMediaType)?;
 
@@ -245,6 +372,15 @@ impl ArchiveReceiver {
             ))));
         }
 
+        if expectations
+            .expected_sha256_hex
+            .is_some_and(|expected| expected != sha256_hex)
+        {
+            let _ = tokio::fs::remove_file(&staging_path).await;
+            self.fail_run(run_id, &ImportState::Received).await;
+            return Err(ReceiptError::DigestMismatch);
+        }
+
         self.repository
             .record_hash(run_id, sha256_hex.clone(), byte_length)
             .await
@@ -258,7 +394,9 @@ impl ArchiveReceiver {
             sha256_hex,
             byte_length,
         };
-        let outcome = self.settle_hashed(context, &staging_path).await;
+        let outcome = self
+            .settle_hashed(context, expectations.platform_operation, &staging_path)
+            .await;
         let _ = tokio::fs::remove_file(&staging_path).await;
         match &outcome {
             Ok(ReceiptOutcome::Stored { .. }) => {
@@ -286,6 +424,7 @@ impl ArchiveReceiver {
     async fn settle_hashed(
         &self,
         context: HashedContext,
+        platform_operation: Option<PlatformOperation>,
         staging_path: &Path,
     ) -> Result<ReceiptOutcome, ReceiptError> {
         if let Some(existing_export_id) = self
@@ -311,19 +450,21 @@ impl ArchiveReceiver {
 
         match self
             .repository
-            .publish_export(
-                context.run_id,
-                &context.tenant,
-                &AcquisitionMode::parse(&context.mode_spelling)
+            .publish_export(PublishRequest {
+                run_id: context.run_id,
+                account_external_ref: context.tenant.clone(),
+                mode: AcquisitionMode::parse(&context.mode_spelling)
                     .unwrap_or(AcquisitionMode::ConsumerExport),
                 blob_ref_json,
-                context.sha256_hex.clone(),
-                context.byte_length,
-            )
+                sha256_hex: context.sha256_hex.clone(),
+                byte_length: context.byte_length,
+                platform_operation,
+            })
             .await
         {
-            Ok(export_id) => Ok(ReceiptOutcome::Stored {
-                export_id,
+            Ok(published) => Ok(ReceiptOutcome::Stored {
+                export_id: published.export_id,
+                ai_archive_id: published.ai_archive_id,
                 sha256_hex: context.sha256_hex,
                 byte_length: context.byte_length,
             }),
@@ -507,7 +648,7 @@ impl ArchiveReceiver {
             sha256_hex,
             byte_length,
         };
-        let outcome = self.settle_hashed(context, &staging_path).await;
+        let outcome = self.settle_hashed(context, None, &staging_path).await;
         let _ = tokio::fs::remove_file(&staging_path).await;
         outcome.map(Some)
     }

@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::receipt::AcquisitionMode;
-use crate::receipt::repository::{ReceiptRepository, RepoFuture, RepositoryError, RunRecord};
+use crate::receipt::report::raw_stored_partial;
+use crate::receipt::repository::{
+    PublishRequest, PublishedExport, ReceiptRepository, RepoFuture, RepositoryError, RunRecord,
+};
 use crate::receipt::state::ImportState;
 
 /// The backend failure the fake reports when a lock is poisoned or a run id
@@ -76,6 +79,8 @@ impl FakeRun {
 pub struct FakeExport {
     /// The export identity.
     pub export_id: Uuid,
+    /// Ratatoskr archive-import identity.
+    pub ai_archive_id: Uuid,
     /// Owning tenant reference.
     pub account_external_ref: String,
     /// Digest of the evidence.
@@ -90,6 +95,7 @@ struct State {
     exports: Vec<FakeExport>,
     advances: Vec<(Uuid, ImportState, ImportState)>,
     publishes: Vec<(Uuid, String, String, u64)>,
+    operation_reports: Vec<serde_json::Value>,
 }
 
 /// An in-memory [`ReceiptRepository`] for receiver tests.
@@ -137,6 +143,12 @@ impl FakeReceiptRepository {
     #[must_use]
     pub fn publishes(&self) -> Vec<(Uuid, String, String, u64)> {
         self.lock().publishes.clone()
+    }
+
+    /// Snapshots the terminal operation reports recorded for Platform receipts.
+    #[must_use]
+    pub fn operation_reports(&self) -> Vec<serde_json::Value> {
+        self.lock().operation_reports.clone()
     }
 
     /// Loads one run's fake record.
@@ -291,15 +303,15 @@ impl ReceiptRepository for FakeReceiptRepository {
 
     fn publish_export(
         &self,
-        run_id: Uuid,
-        account_external_ref: &str,
-        _mode: &AcquisitionMode,
-        blob_ref_json: serde_json::Value,
-        sha256_hex: String,
-        byte_length: u64,
-    ) -> RepoFuture<Result<Uuid, RepositoryError>> {
+        request: PublishRequest,
+    ) -> RepoFuture<Result<PublishedExport, RepositoryError>> {
         let state = Arc::clone(&self.state);
-        let account = account_external_ref.to_owned();
+        let account = request.account_external_ref;
+        let run_id = request.run_id;
+        let blob_ref_json = request.blob_ref_json;
+        let sha256_hex = request.sha256_hex;
+        let byte_length = request.byte_length;
+        let platform_operation = request.platform_operation;
         Box::pin(async move {
             let mut guard = state.lock().map_err(|_| backend("publishes poisoned"))?;
             guard
@@ -314,8 +326,15 @@ impl ReceiptRepository for FakeReceiptRepository {
                 });
             }
             let export_id = Uuid::now_v7();
+            let ai_archive_id = Uuid::now_v7();
+            if let Some(operation) = platform_operation {
+                guard
+                    .operation_reports
+                    .push(raw_stored_partial(operation, ai_archive_id)?);
+            }
             guard.exports.push(FakeExport {
                 export_id,
+                ai_archive_id,
                 account_external_ref: account,
                 sha256_hex,
                 blob_ref_json,
@@ -326,7 +345,10 @@ impl ReceiptRepository for FakeReceiptRepository {
                 .ok_or_else(|| backend("no such run"))?;
             run.state = ImportState::Stored;
             run.export_id = Some(export_id);
-            Ok(export_id)
+            Ok(PublishedExport {
+                export_id,
+                ai_archive_id,
+            })
         })
     }
 }

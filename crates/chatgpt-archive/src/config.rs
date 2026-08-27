@@ -58,6 +58,11 @@ pub struct ReceiptConfig {
     /// Bearer tokens that may authenticate a receipt, one per tenant.
     #[serde(skip_serializing)]
     pub tenant_tokens: Vec<TenantToken>,
+    /// Explicit Platform user to local account mappings for loopback archive receipts.
+    pub platform_accounts: Vec<(uuid::Uuid, String)>,
+    /// Optional NATS endpoint used to publish the durable receipt outbox.
+    #[serde(skip_serializing)]
+    pub event_bus_url: Option<SecretString>,
 }
 
 /// Loopback operator listener configuration.
@@ -241,6 +246,8 @@ const KEY_MAX_ARCHIVE_DECOMPRESSED_BYTES: &str =
 const KEY_MAX_ARCHIVE_COMPRESSION_RATIO: &str = "RATATOSKR__LIMITS__MAX_ARCHIVE_COMPRESSION_RATIO";
 const KEY_RECEIPT_STAGING_ROOT: &str = "RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT";
 const KEY_TENANT_TOKENS: &str = "RATATOSKR__RECEIPT__TENANT_TOKENS";
+const KEY_PLATFORM_ACCOUNTS: &str = "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS";
+const KEY_EVENT_BUS_URL: &str = "RATATOSKR__RECEIPT__EVENT_BUS_URL";
 
 #[allow(
     clippy::too_many_lines,
@@ -346,6 +353,42 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 }
             }
         }
+        KEY_PLATFORM_ACCOUNTS => {
+            if value.is_empty() {
+                violations.push(refused(
+                    "must be a comma-separated list of <platform-user-uuid>=<account-ref> pairs",
+                ));
+            } else {
+                for entry in value.split(',') {
+                    let Some((user_id, account)) = entry.split_once('=') else {
+                        violations.push(refused("must be a comma-separated list of <platform-user-uuid>=<account-ref> pairs"));
+                        continue;
+                    };
+                    let Ok(user_id) = user_id.parse::<uuid::Uuid>() else {
+                        violations.push(refused(
+                            "every mapping needs a canonical platform user UUID",
+                        ));
+                        continue;
+                    };
+                    if account.is_empty() {
+                        violations
+                            .push(refused("every mapping needs a non-empty account reference"));
+                        continue;
+                    }
+                    config
+                        .receipt
+                        .platform_accounts
+                        .push((user_id, account.to_owned()));
+                }
+            }
+        }
+        KEY_EVENT_BUS_URL => {
+            if value.starts_with("nats://") || value.starts_with("tls://") {
+                config.receipt.event_bus_url = Some(SecretString::from(value.to_owned()));
+            } else {
+                violations.push(refused("must be a nats:// or tls:// endpoint"));
+            }
+        }
         _ => violations.push(refused("is not recognized")),
     }
 }
@@ -395,6 +438,8 @@ impl Default for Config {
             },
             receipt: ReceiptConfig {
                 tenant_tokens: Vec::new(),
+                platform_accounts: Vec::new(),
+                event_bus_url: None,
             },
             limits: Limits {
                 database_connections: 8,
