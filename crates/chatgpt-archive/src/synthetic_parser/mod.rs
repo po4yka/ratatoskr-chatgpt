@@ -1,5 +1,6 @@
 //! First synthetic `conversations.json` parser contract.
 
+mod assets;
 mod decode;
 mod input;
 mod model;
@@ -8,12 +9,49 @@ mod parts;
 use std::collections::BTreeSet;
 
 pub use model::{
-    ContentPartKind, MessageRole, ParsedContentPart, ParsedConversation, ParsedConversations,
-    ParsedMessage, RawRecord,
+    AssetAnomaly, AssetAvailability, AssetKind, ContentPartKind, InstructionKind, MessageRole,
+    ParsedAsset, ParsedCanvasDocument, ParsedContentPart, ParsedConversation, ParsedConversations,
+    ParsedInstruction, ParsedMessage, ParsedProject, RawRecord,
 };
 
 use crate::receipt::AcquisitionMode;
-use crate::{ParserId, ParserRegistration};
+use crate::{BlobStore, ExtractedArtifact, ParserId, ParserRegistration};
+
+/// All immutable evidence available to the synthetic archive parser.
+#[derive(Debug)]
+pub struct SyntheticArchiveInput<'a> {
+    selected: &'a ParserId,
+    conversations_json: &'a [u8],
+    projects_json: Option<&'a [u8]>,
+    canvas_json: Option<&'a [u8]>,
+    assets_json: Option<&'a [u8]>,
+    extracted_artifacts: &'a [ExtractedArtifact],
+    blob_store: &'a BlobStore,
+}
+
+impl<'a> SyntheticArchiveInput<'a> {
+    /// Creates a bounded parser input from already-extracted immutable evidence.
+    #[must_use]
+    pub fn new(
+        selected: &'a ParserId,
+        conversations_json: &'a [u8],
+        projects_json: Option<&'a [u8]>,
+        canvas_json: Option<&'a [u8]>,
+        assets_json: Option<&'a [u8]>,
+        extracted_artifacts: &'a [ExtractedArtifact],
+        blob_store: &'a BlobStore,
+    ) -> Self {
+        Self {
+            selected,
+            conversations_json,
+            projects_json,
+            canvas_json,
+            assets_json,
+            extracted_artifacts,
+            blob_store,
+        }
+    }
+}
 
 /// Stable synthetic schema identifier.
 pub const SYNTHETIC_SCHEMA_ID: &str = "chatgpt.synthetic.conversations-json";
@@ -51,19 +89,31 @@ impl SyntheticConversationsParser {
         }
     }
 
-    /// Parses bytes after a registry has selected this parser identity.
+    /// Parses archive evidence after registry selection.
     ///
     /// # Errors
     ///
     /// Returns a structural error without exposing source content.
-    pub fn parse(
+    pub async fn parse_archive(
         &self,
-        source: &[u8],
-        selected: &ParserId,
+        input: &SyntheticArchiveInput<'_>,
     ) -> Result<ParsedConversations, SyntheticParserError> {
-        if selected != &Self::registration().id {
+        if input.selected != &Self::registration().id {
             return Err(SyntheticParserError::UnexpectedSelection);
         }
-        decode::parse(source, selected.clone())
+        let mut parsed = decode::parse_archive(
+            input.conversations_json,
+            input.projects_json,
+            input.canvas_json,
+            input.selected.clone(),
+        )?;
+        parsed.assets = assets::parse(
+            input.assets_json,
+            input.extracted_artifacts,
+            input.blob_store,
+            &mut parsed.raw_records,
+        )
+        .await?;
+        Ok(parsed)
     }
 }

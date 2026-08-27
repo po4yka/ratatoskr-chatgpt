@@ -13,10 +13,12 @@
 //! by per-tenant digest, and a durable resumable import state machine. Safe
 //! archive inspection and bounded extraction now preserve every accepted entry
 //! through immutable `BlobRefs`, while parser registration selects a supported
-//! version from structural evidence. A narrow synthetic conversations parser
-//! produces deterministic, loss-aware records without claiming real-export
-//! support. The public reconciliation boundary then builds append-only
-//! conversation/message revisions, non-destructive missing observations,
+//! version from structural evidence. A narrow synthetic archive parser produces
+//! deterministic, loss-aware conversation, project, Canvas, and asset evidence
+//! without claiming real-export support. Asset bytes remain usable only after
+//! `BlobRef` verification and exact provider-declaration checks; anomalies remain
+//! quarantined without rendering or preview. The public reconciliation boundary
+//! then builds append-only revisions, non-destructive missing observations,
 //! graph warnings, and conservative in-memory completeness reports. It is not
 //! yet wired into receipt persistence or outbound archive events.
 
@@ -59,8 +61,10 @@ pub use parser_registry::{
     ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
 };
 pub use synthetic_parser::{
-    ContentPartKind, MessageRole, ParsedContentPart, ParsedConversation, ParsedConversations,
-    ParsedMessage, RawRecord, SYNTHETIC_PARSER_NAME, SYNTHETIC_PARSER_VERSION, SYNTHETIC_SCHEMA_ID,
+    AssetAnomaly, AssetAvailability, AssetKind, ContentPartKind, InstructionKind, MessageRole,
+    ParsedAsset, ParsedCanvasDocument, ParsedContentPart, ParsedConversation, ParsedConversations,
+    ParsedInstruction, ParsedMessage, ParsedProject, RawRecord, SYNTHETIC_PARSER_NAME,
+    SYNTHETIC_PARSER_VERSION, SYNTHETIC_SCHEMA_ID, SyntheticArchiveInput,
     SyntheticConversationsParser, SyntheticParserError,
 };
 
@@ -72,8 +76,9 @@ pub use receipt::{
     RepositoryError, RunRecord,
 };
 pub use reconciliation::{
-    ArchiveCompletenessReport, ArchiveReconciler, ArchiveSnapshot, Completeness,
-    ConversationHistory, CoverageGap, CumulativeCompletenessReport, MessageHistory, Observation,
-    ObservationState, ReconciliationResult, ReconciliationWarning, Revision, RevisionStatistics,
-    WarningCode,
+    ArchiveCompletenessReport, ArchiveReconciler, ArchiveSnapshot, AssetHistory,
+    CanvasDocumentHistory, Completeness, ConversationHistory, CoverageGap,
+    CumulativeCompletenessReport, InstructionHistory, MessageHistory, Observation,
+    ObservationState, ProjectHistory, ReconciliationResult, ReconciliationWarning, Revision,
+    RevisionStatistics, WarningCode,
 };

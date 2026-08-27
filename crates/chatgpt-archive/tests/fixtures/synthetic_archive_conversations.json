@@ -1,0 +1,22 @@
+[
+  {
+    "id": "conversation-project",
+    "title": "Synthetic project conversation",
+    "mapping": {
+      "message-project": {
+        "id": "message-project",
+        "parent": null,
+        "message": {
+          "id": "message-project",
+          "author": { "role": "user" },
+          "content": {
+            "parts": [
+              "Archive this file",
+              { "kind": "media_reference", "asset_id": "asset-uploaded", "mime_type": "text/plain" }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

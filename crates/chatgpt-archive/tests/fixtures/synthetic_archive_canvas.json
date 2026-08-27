@@ -1,0 +1,9 @@
+[
+  {
+    "id": "canvas-alpha",
+    "project_id": "project-alpha",
+    "conversation_id": "conversation-project",
+    "content": ["# Inert Canvas", { "kind": "code", "text": "never execute" }],
+    "future_canvas_field": 1
+  }
+]

@@ -2,32 +2,139 @@
 
 use serde_json::Value;
 
-use super::input::{ConversationInput, MappingInput, MessageInput};
+use super::input::{
+    CanvasInput, ConversationInput, InstructionInput, MappingInput, MessageInput, ProjectInput,
+};
 use super::parts::{child_path, normalize_role, parse_parts, record_extra};
 use super::{
-    MessageRole, ParsedConversation, ParsedConversations, ParsedMessage, RawRecord,
-    SYNTHETIC_SCHEMA_ID, SyntheticParserError,
+    InstructionKind, MessageRole, ParsedCanvasDocument, ParsedConversation, ParsedConversations,
+    ParsedInstruction, ParsedMessage, ParsedProject, RawRecord, SYNTHETIC_SCHEMA_ID,
+    SyntheticParserError,
 };
 use crate::ParserId;
 
-pub(super) fn parse(
-    source: &[u8],
+pub(super) fn parse_archive(
+    conversations_source: &[u8],
+    projects_source: Option<&[u8]>,
+    canvas_source: Option<&[u8]>,
     parser: ParserId,
 ) -> Result<ParsedConversations, SyntheticParserError> {
-    let inputs: Vec<ConversationInput> =
-        serde_json::from_slice(source).map_err(|_| SyntheticParserError::InvalidDocument)?;
+    let inputs: Vec<ConversationInput> = serde_json::from_slice(conversations_source)
+        .map_err(|_| SyntheticParserError::InvalidDocument)?;
     let mut raw_records = Vec::new();
     let conversations = inputs
         .into_iter()
         .enumerate()
         .map(|(index, input)| parse_conversation(input, index, &mut raw_records))
         .collect();
+    let projects = parse_projects(projects_source, &mut raw_records)?;
+    let canvas_documents = parse_canvas(canvas_source, &mut raw_records)?;
     Ok(ParsedConversations {
         schema_id: SYNTHETIC_SCHEMA_ID.to_owned(),
         parser,
         conversations,
+        projects,
+        canvas_documents,
+        assets: Vec::new(),
         raw_records,
     })
+}
+
+fn parse_projects(
+    source: Option<&[u8]>,
+    raw_records: &mut Vec<RawRecord>,
+) -> Result<Vec<ParsedProject>, SyntheticParserError> {
+    let Some(source) = source else {
+        return Ok(Vec::new());
+    };
+    let inputs: Vec<ProjectInput> =
+        serde_json::from_slice(source).map_err(|_| SyntheticParserError::InvalidDocument)?;
+    Ok(inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| parse_project(input, index, raw_records))
+        .collect())
+}
+
+fn parse_project(
+    input: ProjectInput,
+    index: usize,
+    raw_records: &mut Vec<RawRecord>,
+) -> ParsedProject {
+    let path = format!("/projects/{index}");
+    record_extra(raw_records, &path, &input.extra);
+    let instructions = input
+        .instructions
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, instruction)| parse_instruction(instruction, ordinal, &path, raw_records))
+        .collect();
+    ParsedProject {
+        external_id: input.id,
+        title: input.title,
+        description: input.description,
+        instructions,
+        conversation_external_ids: input.conversation_ids,
+        asset_external_ids: input.asset_ids,
+        provider_metadata: Value::Object(input.extra),
+    }
+}
+
+fn parse_instruction(
+    input: InstructionInput,
+    ordinal: usize,
+    project_path: &str,
+    raw_records: &mut Vec<RawRecord>,
+) -> ParsedInstruction {
+    let path = child_path(
+        &child_path(project_path, "instructions"),
+        &ordinal.to_string(),
+    );
+    record_extra(raw_records, &path, &input.extra);
+    let kind = match input.kind.as_str() {
+        "instruction" => InstructionKind::Instruction,
+        "system_prompt" => InstructionKind::SystemPrompt,
+        _ => {
+            raw_records.push(RawRecord {
+                path: child_path(&path, "kind"),
+                payload: Value::String(input.kind),
+            });
+            InstructionKind::Unknown
+        }
+    };
+    ParsedInstruction {
+        external_id: input.id,
+        ordinal,
+        kind,
+        content: input.content,
+        provider_metadata: Value::Object(input.extra),
+    }
+}
+
+fn parse_canvas(
+    source: Option<&[u8]>,
+    raw_records: &mut Vec<RawRecord>,
+) -> Result<Vec<ParsedCanvasDocument>, SyntheticParserError> {
+    let Some(source) = source else {
+        return Ok(Vec::new());
+    };
+    let inputs: Vec<CanvasInput> =
+        serde_json::from_slice(source).map_err(|_| SyntheticParserError::InvalidDocument)?;
+    Ok(inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let path = format!("/canvas/{index}");
+            record_extra(raw_records, &path, &input.extra);
+            ParsedCanvasDocument {
+                external_id: input.id,
+                project_external_id: input.project_id,
+                conversation_external_id: input.conversation_id,
+                content: input.content,
+                provider_metadata: Value::Object(input.extra),
+            }
+        })
+        .collect())
 }
 
 fn parse_conversation(

@@ -2,7 +2,7 @@
 
 `ratatoskr-chatgpt` is the ChatGPT archive bounded context for Ratatoskr. It preserves official ChatGPT data exports as immutable evidence, normalizes projects and conversation graphs, archives referenced assets, and publishes searchable local projections without depending on a live ChatGPT browser session.
 
-> **Status:** service scaffold, authenticated archive receipt, safe archive intake, a synthetic conversations parser, and deterministic in-memory graph/revision reconciliation are implemented. The Rust workspace builds a `ratatoskr-chatgpt-archive` binary that boots with typed configuration, structured JSON telemetry, `/health/live` + `/health/ready` + `/metrics` + `/version` endpoints, content-addressed BlobStore storage, applies the first-version `chatgpt_archive` schema (`schema.sql`), and serves `POST /exports`: an authenticated, tenant-scoped receipt that streams uploads through SHA-256 into isolated staging, enforces the configured size cap, publishes immutable raw evidence through BlobStore, records durable resumable import runs (`received -> hashed -> stored -> inspected -> parsed -> reconciled -> complete/partial`, `failed`/`duplicate` terminals), and answers duplicate archives explicitly by per-tenant digest. The library additionally inspects ZIP structure with hostile-input limits, safely stages and stores extracted BlobRefs with raw-digest provenance and quarantine metadata, selects declared parser versions from inspected structure, parses one documented synthetic `conversations.json` schema into deterministic, loss-aware in-memory conversation/message/content-part records, and reconciles caller-supplied ordered parser results. That parser is not support for a real ChatGPT export: an owner-authorized private fixture is still required before a real provider schema can be claimed. The receipt flow does not yet persist or publish reconciliation results. Not implemented yet: real-export parser support, Canvas/assets semantics (item 6), events, portable exports, Compliance adapters.
+> **Status:** service scaffold, authenticated archive receipt, safe archive intake, a synthetic archive-evidence parser, and deterministic in-memory graph/revision reconciliation are implemented. The Rust workspace builds a `ratatoskr-chatgpt-archive` binary that boots with typed configuration, structured JSON telemetry, `/health/live` + `/health/ready` + `/metrics` + `/version` endpoints, content-addressed BlobStore storage, applies the first-version `chatgpt_archive` schema (`schema.sql`), and serves `POST /exports`: an authenticated, tenant-scoped receipt that streams uploads through SHA-256 into isolated staging, enforces the configured size cap, publishes immutable raw evidence through BlobStore, records durable resumable import runs (`received -> hashed -> stored -> inspected -> parsed -> reconciled -> complete/partial`, `failed`/`duplicate` terminals), and answers duplicate archives explicitly by per-tenant digest. The library additionally inspects ZIP structure with hostile-input limits, safely stages and stores extracted BlobRefs with raw-digest provenance and quarantine metadata, selects declared parser versions from inspected structure, parses one documented synthetic archive grammar into deterministic, loss-aware conversations, projects, instructions, Canvas documents, and asset references, and reconciles caller-supplied ordered parser results. Asset bytes remain usable only when their extracted BlobRef verifies and its digest, length, and media type equal the provider declaration; all anomalies remain quarantined evidence with no preview or rendering. That parser is not support for a real ChatGPT export: an owner-authorized private fixture is still required before a real provider schema can be claimed. The receipt flow does not yet persist or publish reconciliation results. Not implemented yet: real-export parser support, events, portable exports, Compliance adapters.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -200,10 +200,11 @@ A provider message ID plus export snapshot identifies an observation. Content ch
 ### Current reconciliation boundary
 
 `ArchiveReconciler` accepts caller-supplied, ordered `ArchiveSnapshot` values
-and returns immutable in-memory evidence. It identifies conversations and their
-messages by provider ID, hashes canonical normalized evidence, and appends a
-revision only when that identity's digest is new. Repeated evidence gains a new
-present observation without a duplicate revision.
+and returns immutable in-memory evidence. It identifies conversations, messages,
+projects, instructions, Canvas documents, and assets by provider ID, hashes
+canonical normalized evidence, and appends a revision only when that identity's
+digest is new. Repeated evidence gains a new present observation without a
+duplicate revision.
 
 An omitted conversation produces `MissingFromLatestSnapshot`, never an inferred
 deletion. Invalid message parents remain visible as orphan observations with a
@@ -211,13 +212,14 @@ non-content warning code; they are not dropped or silently reparented.
 
 The result has one archive report per snapshot plus a cumulative report. They
 separate unique identities, revisions, observations, graph warnings, parser
-warning counts, and explicit coverage gaps. The current synthetic parser emits
-no parse warnings on successful input; its raw-preservation records are kept
-separately and are not silently relabeled as warnings. Because it provides no
-project membership or asset bytes, both reports are always
-`StructurallyPartial` with `ProjectRelationshipsUnobserved` and
-`AssetsUnobserved`. This boundary neither writes the database nor publishes
-events; wiring it to the stored receipt pipeline is a later change.
+warning counts, asset availability counts, and explicit coverage gaps. The
+current synthetic parser emits no parse warnings on successful input; its
+raw-preservation records are kept separately and are not silently relabeled as
+warnings. A missing or quarantined asset, or any unobserved required category,
+keeps the report `StructurallyPartial`; no report contains titles, instructions,
+filenames, document content, raw provider values, or digests. This boundary
+neither writes the database nor publishes events; wiring it to the stored
+receipt pipeline is a later change.
 
 ## Content parts
 

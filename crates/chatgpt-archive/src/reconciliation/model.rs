@@ -18,10 +18,62 @@ pub struct ArchiveSnapshot {
 pub struct ReconciliationResult {
     /// Histories ordered by conversation external ID.
     pub conversations: Vec<ConversationHistory>,
+    /// Histories ordered by project external ID.
+    pub projects: Vec<ProjectHistory>,
+    /// Histories ordered by Canvas document external ID.
+    pub canvas_documents: Vec<CanvasDocumentHistory>,
+    /// Histories ordered by asset external ID.
+    pub assets: Vec<AssetHistory>,
     /// One report per supplied archive in sequence order.
     pub archive_reports: Vec<ArchiveCompletenessReport>,
     /// Aggregate report across every supplied archive.
     pub cumulative_report: CumulativeCompletenessReport,
+}
+
+/// Append-only evidence for one provider project identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectHistory {
+    /// Stable provider project identity.
+    pub external_id: String,
+    /// Distinct normalized project revisions in first-seen order.
+    pub revisions: Vec<Revision>,
+    /// Archive observations in sequence order.
+    pub observations: Vec<Observation>,
+    /// Instruction histories ordered by their stable evidence identity.
+    pub instructions: Vec<InstructionHistory>,
+}
+
+/// Append-only evidence for one project instruction identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionHistory {
+    /// Stable instruction evidence identity within its project.
+    pub external_id: String,
+    /// Distinct normalized instruction revisions in first-seen order.
+    pub revisions: Vec<Revision>,
+    /// Archive observations in sequence order.
+    pub observations: Vec<Observation>,
+}
+
+/// Append-only evidence for one Canvas document identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasDocumentHistory {
+    /// Stable provider Canvas document identity.
+    pub external_id: String,
+    /// Distinct normalized document revisions in first-seen order.
+    pub revisions: Vec<Revision>,
+    /// Archive observations in sequence order.
+    pub observations: Vec<Observation>,
+}
+
+/// Append-only evidence for one provider asset identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetHistory {
+    /// Stable provider asset identity.
+    pub external_id: String,
+    /// Distinct normalized asset revisions in first-seen order.
+    pub revisions: Vec<Revision>,
+    /// Archive observations in sequence order.
+    pub observations: Vec<Observation>,
 }
 
 /// Append-only evidence for one provider conversation identity.
@@ -106,4 +158,10 @@ pub enum CoverageGap {
     ProjectRelationshipsUnobserved,
     /// The parser supplied no archived asset-byte evidence.
     AssetsUnobserved,
+    /// The parser supplied no Canvas-document evidence.
+    CanvasDocumentsUnobserved,
+    /// At least one supplied asset reference had no archive bytes.
+    AssetsMissing,
+    /// At least one supplied asset failed integrity or quarantine checks.
+    AssetsQuarantined,
 }

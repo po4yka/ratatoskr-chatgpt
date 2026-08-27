@@ -38,6 +38,20 @@ pub struct ArchiveCompletenessReport {
     pub conversations_discovered: usize,
     /// Messages found in this archive.
     pub messages_discovered: usize,
+    /// Projects found in this archive.
+    pub projects_discovered: usize,
+    /// Instructions and system prompts found in this archive.
+    pub instructions_discovered: usize,
+    /// Canvas-like documents found in this archive.
+    pub canvas_documents_discovered: usize,
+    /// File or generated-asset references found in this archive.
+    pub asset_references_discovered: usize,
+    /// Assets with a usable verified `BlobRef`.
+    pub verified_assets: usize,
+    /// Assets referenced without archive bytes.
+    pub missing_assets: usize,
+    /// Assets retained but unavailable due to anomaly or quarantine.
+    pub quarantined_assets: usize,
     /// Messages retained as graph orphans.
     pub orphan_messages: usize,
     /// Parser warnings observed while producing this archive's normalized evidence.
@@ -59,10 +73,22 @@ pub struct CumulativeCompletenessReport {
     pub unique_conversations: usize,
     /// Distinct provider message identities.
     pub unique_messages: usize,
+    /// Distinct provider project identities.
+    pub unique_projects: usize,
+    /// Distinct provider Canvas document identities.
+    pub unique_canvas_documents: usize,
+    /// Distinct provider asset identities.
+    pub unique_assets: usize,
     /// Total unique conversation revisions.
     pub conversation_revisions: usize,
     /// Total unique message revisions.
     pub message_revisions: usize,
+    /// Total unique project revisions.
+    pub project_revisions: usize,
+    /// Total unique Canvas document revisions.
+    pub canvas_document_revisions: usize,
+    /// Total unique asset revisions.
+    pub asset_revisions: usize,
     /// Warnings from every archive in deterministic order.
     pub warnings: Vec<ReconciliationWarning>,
     /// Sum of parser warnings from every archive.

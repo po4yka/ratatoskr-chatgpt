@@ -1,11 +1,4 @@
-# archive-completeness-reporting Specification
-
-## Purpose
-
-Produces conservative, deterministic archive-local and cumulative evidence
-reports so an archive owner can assess coverage without optimistic claims.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Every reconciled archive has an evidence-based report
 
@@ -37,9 +30,9 @@ instructions, document content, raw provider values, or asset digests.
 The service SHALL produce a cumulative report over all reconciled snapshots.
 Its totals SHALL distinguish unique identities from revision count and archive
 observations, and SHALL sum archive-local warnings and missing observations. The
-report SHALL classify completeness conservatively: it SHALL NOT report `Complete`
-while project relationship, Canvas, or asset coverage is unobserved, or while an
-observed asset is missing or quarantined.
+report SHALL classify completeness conservatively: it SHALL NOT report
+`Complete` while project relationship, Canvas, or asset coverage is unobserved,
+or while an observed asset is missing or quarantined.
 
 #### Scenario: cumulative report arithmetic remains conservative
 
@@ -56,15 +49,3 @@ observed asset is missing or quarantined.
   snapshot with a quarantined asset
 - **THEN** the cumulative report retains the anomaly count and does not classify
   coverage as complete
-
-### Requirement: Report ordering is deterministic for identical archive sequences
-
-For identical ordered input snapshots, report records, warnings, gaps, and
-revision statistics SHALL be returned in the same order and with equal values
-on every reconciliation run.
-
-#### Scenario: identical sequences yield identical reports
-
-- **WHEN** `reconciliation_reports_are_deterministic` reconciles the same
-  fixture sequence twice
-- **THEN** both archive-local reports and the cumulative report are equal

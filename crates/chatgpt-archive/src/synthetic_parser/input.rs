@@ -56,3 +56,37 @@ pub(super) struct ContentInput {
     #[serde(flatten)]
     pub(super) extra: Map<String, Value>,
 }
+
+#[derive(Deserialize)]
+pub(super) struct ProjectInput {
+    pub(super) id: String,
+    pub(super) title: Option<String>,
+    pub(super) description: Option<String>,
+    #[serde(default)]
+    pub(super) instructions: Vec<InstructionInput>,
+    #[serde(default)]
+    pub(super) conversation_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) asset_ids: Vec<String>,
+    #[serde(flatten)]
+    pub(super) extra: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct InstructionInput {
+    pub(super) id: Option<String>,
+    pub(super) kind: String,
+    pub(super) content: Value,
+    #[serde(flatten)]
+    pub(super) extra: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CanvasInput {
+    pub(super) id: String,
+    pub(super) project_id: Option<String>,
+    pub(super) conversation_id: Option<String>,
+    pub(super) content: Vec<Value>,
+    #[serde(flatten)]
+    pub(super) extra: Map<String, Value>,
+}

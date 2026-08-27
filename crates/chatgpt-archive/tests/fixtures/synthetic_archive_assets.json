@@ -1,0 +1,13 @@
+[
+  {
+    "id": "asset-uploaded",
+    "kind": "uploaded",
+    "project_id": "project-alpha",
+    "conversation_id": "conversation-project",
+    "display_name": "note.txt",
+    "archive_path": "assets/note.txt",
+    "media_type": "text/plain",
+    "length_bytes": 20,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+]

@@ -6,8 +6,9 @@ mod model;
 mod report;
 
 pub use model::{
-    ArchiveSnapshot, ConversationHistory, CoverageGap, MessageHistory, Observation,
-    ObservationState, ReconciliationResult, ReconciliationWarning, Revision, WarningCode,
+    ArchiveSnapshot, AssetHistory, CanvasDocumentHistory, ConversationHistory, CoverageGap,
+    InstructionHistory, MessageHistory, Observation, ObservationState, ProjectHistory,
+    ReconciliationResult, ReconciliationWarning, Revision, WarningCode,
 };
 pub use report::{
     ArchiveCompletenessReport, Completeness, CumulativeCompletenessReport, RevisionStatistics,

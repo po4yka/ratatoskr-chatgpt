@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 use sha2::Digest as _;
 
-use crate::{ContentPartKind, MessageRole, ParsedConversation, ParsedMessage};
+use crate::{
+    AssetAvailability, AssetKind, ContentPartKind, InstructionKind, MessageRole, ParsedAsset,
+    ParsedCanvasDocument, ParsedConversation, ParsedInstruction, ParsedMessage, ParsedProject,
+};
 
 pub(super) fn conversation_digest(conversation: &ParsedConversation) -> String {
     let mut messages = conversation.messages.iter().collect::<Vec<_>>();
@@ -22,6 +25,52 @@ pub(super) fn conversation_digest(conversation: &ParsedConversation) -> String {
 
 pub(super) fn message_digest(message: &ParsedMessage) -> String {
     digest(&message_value(message))
+}
+
+pub(super) fn project_digest(project: &ParsedProject) -> String {
+    digest(&json!({
+        "external_id": project.external_id,
+        "title": project.title,
+        "description": project.description,
+        "conversation_external_ids": project.conversation_external_ids,
+        "asset_external_ids": project.asset_external_ids,
+        "provider_metadata": canonicalize(&project.provider_metadata),
+    }))
+}
+
+pub(super) fn instruction_digest(instruction: &ParsedInstruction) -> String {
+    digest(&json!({
+        "external_id": instruction.external_id,
+        "ordinal": instruction.ordinal,
+        "kind": instruction_kind_name(instruction.kind),
+        "content": canonicalize(&instruction.content),
+        "provider_metadata": canonicalize(&instruction.provider_metadata),
+    }))
+}
+
+pub(super) fn canvas_digest(document: &ParsedCanvasDocument) -> String {
+    digest(&json!({
+        "external_id": document.external_id,
+        "project_external_id": document.project_external_id,
+        "conversation_external_id": document.conversation_external_id,
+        "content": document.content.iter().map(canonicalize).collect::<Vec<_>>(),
+        "provider_metadata": canonicalize(&document.provider_metadata),
+    }))
+}
+
+pub(super) fn asset_digest(asset: &ParsedAsset) -> String {
+    digest(&json!({
+        "external_id": asset.external_id,
+        "kind": asset_kind_name(asset.kind),
+        "project_external_id": asset.project_external_id,
+        "conversation_external_id": asset.conversation_external_id,
+        "display_name": asset.display_name,
+        "media_type": asset.media_type,
+        "availability": availability_name(asset.availability),
+        "blob": asset.blob,
+        "anomaly": asset.anomaly.map(anomaly_name),
+        "provider_metadata": canonicalize(&asset.provider_metadata),
+    }))
 }
 
 fn digest(value: &Value) -> String {
@@ -79,5 +128,42 @@ fn part_kind_name(kind: &ContentPartKind) -> &'static str {
         ContentPartKind::Image => "image",
         ContentPartKind::File => "file",
         ContentPartKind::Unknown => "unknown",
+    }
+}
+
+fn instruction_kind_name(kind: InstructionKind) -> &'static str {
+    match kind {
+        InstructionKind::Instruction => "instruction",
+        InstructionKind::SystemPrompt => "system_prompt",
+        InstructionKind::Unknown => "unknown",
+    }
+}
+
+fn asset_kind_name(kind: AssetKind) -> &'static str {
+    match kind {
+        AssetKind::Uploaded => "uploaded",
+        AssetKind::Generated => "generated",
+        AssetKind::Unknown => "unknown",
+    }
+}
+
+fn availability_name(availability: AssetAvailability) -> &'static str {
+    match availability {
+        AssetAvailability::Missing => "missing",
+        AssetAvailability::Quarantined => "quarantined",
+        AssetAvailability::Verified => "verified",
+    }
+}
+
+fn anomaly_name(anomaly: crate::AssetAnomaly) -> &'static str {
+    match anomaly {
+        crate::AssetAnomaly::MissingArtifact => "missing_artifact",
+        crate::AssetAnomaly::ExtractedArtifactQuarantined => "extracted_artifact_quarantined",
+        crate::AssetAnomaly::BlobVerificationFailed => "blob_verification_failed",
+        crate::AssetAnomaly::DigestMismatch => "digest_mismatch",
+        crate::AssetAnomaly::LengthMismatch => "length_mismatch",
+        crate::AssetAnomaly::MediaTypeMismatch => "media_type_mismatch",
+        crate::AssetAnomaly::InvalidDeclaration => "invalid_declaration",
+        crate::AssetAnomaly::AmbiguousArtifact => "ambiguous_artifact",
     }
 }

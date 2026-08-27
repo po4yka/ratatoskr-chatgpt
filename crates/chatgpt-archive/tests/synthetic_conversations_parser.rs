@@ -12,8 +12,8 @@
 use std::collections::BTreeSet;
 
 use ratatoskr_chatgpt_archive::{
-    AcquisitionMode, ArchiveInventory, ContentPartKind, ParserRegistry, ParserSelection,
-    SYNTHETIC_PARSER_NAME, SYNTHETIC_PARSER_VERSION, SYNTHETIC_SCHEMA_ID,
+    AcquisitionMode, ArchiveInventory, BlobStore, ContentPartKind, ParserRegistry, ParserSelection,
+    SYNTHETIC_PARSER_NAME, SYNTHETIC_PARSER_VERSION, SYNTHETIC_SCHEMA_ID, SyntheticArchiveInput,
     SyntheticConversationsParser,
 };
 
@@ -36,15 +36,22 @@ fn selected_parser() -> ratatoskr_chatgpt_archive::ParserId {
     }
 }
 
-fn parse_fixture() -> ratatoskr_chatgpt_archive::ParsedConversations {
+async fn parse_fixture() -> ratatoskr_chatgpt_archive::ParsedConversations {
+    let root = tempfile::tempdir().expect("temporary blob root");
+    let store = BlobStore::new(root.path()).expect("blob store");
+    let artifacts = Vec::new();
+    let selected = selected_parser();
+    let input =
+        SyntheticArchiveInput::new(&selected, FIXTURE, None, None, None, &artifacts, &store);
     SyntheticConversationsParser
-        .parse(FIXTURE, &selected_parser())
+        .parse_archive(&input)
+        .await
         .expect("synthetic fixture must parse")
 }
 
-#[test]
-fn synthetic_fixture_maps_conversations_messages_and_parts() {
-    let parsed = parse_fixture();
+#[tokio::test]
+async fn synthetic_fixture_maps_conversations_messages_and_parts() {
+    let parsed = parse_fixture().await;
     assert_eq!(parsed.conversations.len(), 2);
     assert_eq!(parsed.conversations[0].external_id, "conversation-alpha");
     assert_eq!(parsed.conversations[0].messages.len(), 2);
@@ -67,22 +74,22 @@ fn synthetic_fixture_maps_conversations_messages_and_parts() {
     );
 }
 
-#[test]
-fn successful_parse_carries_schema_and_parser_version() {
-    let parsed = parse_fixture();
+#[tokio::test]
+async fn successful_parse_carries_schema_and_parser_version() {
+    let parsed = parse_fixture().await;
     assert_eq!(parsed.schema_id, SYNTHETIC_SCHEMA_ID);
     assert_eq!(parsed.parser.name, SYNTHETIC_PARSER_NAME);
     assert_eq!(parsed.parser.version, SYNTHETIC_PARSER_VERSION);
 }
 
-#[test]
-fn parsing_identical_fixture_is_deterministic() {
-    assert_eq!(parse_fixture(), parse_fixture());
+#[tokio::test]
+async fn parsing_identical_fixture_is_deterministic() {
+    assert_eq!(parse_fixture().await, parse_fixture().await);
 }
 
-#[test]
-fn unknown_fields_and_parts_remain_losslessly_available() {
-    let parsed = parse_fixture();
+#[tokio::test]
+async fn unknown_fields_and_parts_remain_losslessly_available() {
+    let parsed = parse_fixture().await;
     assert!(parsed.raw_records.iter().any(|record| {
         record.path == "/0/conversation_unknown" && record.payload["retained"] == true
     }));

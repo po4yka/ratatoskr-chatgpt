@@ -3,14 +3,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    ArchiveCompletenessReport, ArchiveSnapshot, Completeness, ConversationHistory, CoverageGap,
-    CumulativeCompletenessReport, MessageHistory, Observation, ObservationState,
-    ReconciliationResult, ReconciliationWarning, Revision, RevisionStatistics, WarningCode,
+    ArchiveCompletenessReport, ArchiveSnapshot, AssetHistory, CanvasDocumentHistory, Completeness,
+    ConversationHistory, CoverageGap, CumulativeCompletenessReport, InstructionHistory,
+    MessageHistory, Observation, ObservationState, ProjectHistory, ReconciliationResult,
+    ReconciliationWarning, Revision, RevisionStatistics, WarningCode,
 };
-use crate::ParsedConversation;
+use crate::{
+    AssetAvailability, ParsedAsset, ParsedCanvasDocument, ParsedConversation, ParsedInstruction,
+    ParsedProject,
+};
 
 pub(super) fn reconcile(snapshots: &[ArchiveSnapshot]) -> ReconciliationResult {
     let mut histories = BTreeMap::new();
+    let mut projects = BTreeMap::new();
+    let mut canvas_documents = BTreeMap::new();
+    let mut assets = BTreeMap::new();
     let mut archive_reports = Vec::new();
     for snapshot in snapshots {
         let graph = graph_evidence(snapshot);
@@ -54,14 +61,228 @@ pub(super) fn reconcile(snapshots: &[ArchiveSnapshot]) -> ReconciliationResult {
                 statistics.missing_conversation_observations += 1;
             }
         }
+        reconcile_additional_evidence(snapshot, &mut projects, &mut canvas_documents, &mut assets);
         archive_reports.push(archive_report(snapshot, graph.warnings, statistics));
     }
     let conversations = histories.into_values().collect::<Vec<_>>();
-    let cumulative_report = cumulative_report(&conversations, &archive_reports);
+    let projects = projects.into_values().collect::<Vec<_>>();
+    let canvas_documents = canvas_documents.into_values().collect::<Vec<_>>();
+    let assets = assets.into_values().collect::<Vec<_>>();
+    let cumulative_report = cumulative_report(
+        &conversations,
+        &projects,
+        &canvas_documents,
+        &assets,
+        &archive_reports,
+    );
     ReconciliationResult {
         conversations,
+        projects,
+        canvas_documents,
+        assets,
         archive_reports,
         cumulative_report,
+    }
+}
+
+fn reconcile_additional_evidence(
+    snapshot: &ArchiveSnapshot,
+    projects: &mut BTreeMap<String, ProjectHistory>,
+    canvas_documents: &mut BTreeMap<String, CanvasDocumentHistory>,
+    assets: &mut BTreeMap<String, AssetHistory>,
+) {
+    let present_project_ids = snapshot
+        .parsed
+        .projects
+        .iter()
+        .map(|project| project.external_id.as_str())
+        .collect::<BTreeSet<_>>();
+    observe_projects(projects, &snapshot.parsed.projects, &snapshot.archive_id);
+    record_missing_projects(projects, &present_project_ids, &snapshot.archive_id);
+
+    let present_canvas_ids = snapshot
+        .parsed
+        .canvas_documents
+        .iter()
+        .map(|document| document.external_id.as_str())
+        .collect::<BTreeSet<_>>();
+    observe_canvas(
+        canvas_documents,
+        &snapshot.parsed.canvas_documents,
+        &snapshot.archive_id,
+    );
+    record_missing_canvas(canvas_documents, &present_canvas_ids, &snapshot.archive_id);
+
+    let present_asset_ids = snapshot
+        .parsed
+        .assets
+        .iter()
+        .map(|asset| asset.external_id.as_str())
+        .collect::<BTreeSet<_>>();
+    observe_assets(assets, &snapshot.parsed.assets, &snapshot.archive_id);
+    record_missing_assets(assets, &present_asset_ids, &snapshot.archive_id);
+}
+
+fn missing_observation(archive_id: &str) -> Observation {
+    Observation {
+        archive_id: archive_id.to_owned(),
+        state: ObservationState::MissingFromLatestSnapshot,
+        revision_digest: None,
+        orphaned: false,
+    }
+}
+
+fn record_missing_projects(
+    histories: &mut BTreeMap<String, ProjectHistory>,
+    present_ids: &BTreeSet<&str>,
+    archive_id: &str,
+) {
+    for (external_id, history) in histories {
+        if !present_ids.contains(external_id.as_str()) {
+            history.observations.push(missing_observation(archive_id));
+            for instruction in &mut history.instructions {
+                instruction
+                    .observations
+                    .push(missing_observation(archive_id));
+            }
+        }
+    }
+}
+
+fn record_missing_canvas(
+    histories: &mut BTreeMap<String, CanvasDocumentHistory>,
+    present_ids: &BTreeSet<&str>,
+    archive_id: &str,
+) {
+    for (external_id, history) in histories {
+        if !present_ids.contains(external_id.as_str()) {
+            history.observations.push(missing_observation(archive_id));
+        }
+    }
+}
+
+fn record_missing_assets(
+    histories: &mut BTreeMap<String, AssetHistory>,
+    present_ids: &BTreeSet<&str>,
+    archive_id: &str,
+) {
+    for (external_id, history) in histories {
+        if !present_ids.contains(external_id.as_str()) {
+            history.observations.push(missing_observation(archive_id));
+        }
+    }
+}
+
+fn observe_projects(
+    histories: &mut BTreeMap<String, ProjectHistory>,
+    projects: &[ParsedProject],
+    archive_id: &str,
+) {
+    for project in projects {
+        let history = histories
+            .entry(project.external_id.clone())
+            .or_insert_with(|| ProjectHistory {
+                external_id: project.external_id.clone(),
+                revisions: Vec::new(),
+                observations: Vec::new(),
+                instructions: Vec::new(),
+            });
+        record_present(
+            &mut history.revisions,
+            &mut history.observations,
+            archive_id,
+            super::digest::project_digest(project),
+            false,
+        );
+        let mut instructions = history
+            .instructions
+            .drain(..)
+            .map(|history| (history.external_id.clone(), history))
+            .collect::<BTreeMap<_, _>>();
+        let present_instruction_ids = project
+            .instructions
+            .iter()
+            .map(|instruction| instruction_external_id(project, instruction))
+            .collect::<BTreeSet<_>>();
+        for instruction in &project.instructions {
+            let external_id = instruction_external_id(project, instruction);
+            let instruction_history =
+                instructions
+                    .entry(external_id.clone())
+                    .or_insert_with(|| InstructionHistory {
+                        external_id,
+                        revisions: Vec::new(),
+                        observations: Vec::new(),
+                    });
+            record_present(
+                &mut instruction_history.revisions,
+                &mut instruction_history.observations,
+                archive_id,
+                super::digest::instruction_digest(instruction),
+                false,
+            );
+        }
+        for (external_id, instruction_history) in &mut instructions {
+            if !present_instruction_ids.contains(external_id) {
+                instruction_history
+                    .observations
+                    .push(missing_observation(archive_id));
+            }
+        }
+        history.instructions = instructions.into_values().collect();
+    }
+}
+
+fn instruction_external_id(project: &ParsedProject, instruction: &ParsedInstruction) -> String {
+    instruction
+        .external_id
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", project.external_id, instruction.ordinal))
+}
+
+fn observe_canvas(
+    histories: &mut BTreeMap<String, CanvasDocumentHistory>,
+    documents: &[ParsedCanvasDocument],
+    archive_id: &str,
+) {
+    for document in documents {
+        let history = histories
+            .entry(document.external_id.clone())
+            .or_insert_with(|| CanvasDocumentHistory {
+                external_id: document.external_id.clone(),
+                revisions: Vec::new(),
+                observations: Vec::new(),
+            });
+        record_present(
+            &mut history.revisions,
+            &mut history.observations,
+            archive_id,
+            super::digest::canvas_digest(document),
+            false,
+        );
+    }
+}
+
+fn observe_assets(
+    histories: &mut BTreeMap<String, AssetHistory>,
+    assets: &[ParsedAsset],
+    archive_id: &str,
+) {
+    for asset in assets {
+        let history = histories
+            .entry(asset.external_id.clone())
+            .or_insert_with(|| AssetHistory {
+                external_id: asset.external_id.clone(),
+                revisions: Vec::new(),
+                observations: Vec::new(),
+            });
+        record_present(
+            &mut history.revisions,
+            &mut history.observations,
+            archive_id,
+            super::digest::asset_digest(asset),
+            false,
+        );
     }
 }
 
@@ -192,6 +413,40 @@ fn archive_report(
     warnings: Vec<ReconciliationWarning>,
     revision_statistics: RevisionStatistics,
 ) -> ArchiveCompletenessReport {
+    let verified_assets = snapshot
+        .parsed
+        .assets
+        .iter()
+        .filter(|asset| asset.availability == AssetAvailability::Verified)
+        .count();
+    let missing_assets = snapshot
+        .parsed
+        .assets
+        .iter()
+        .filter(|asset| asset.availability == AssetAvailability::Missing)
+        .count();
+    let quarantined_assets = snapshot
+        .parsed
+        .assets
+        .iter()
+        .filter(|asset| asset.availability == AssetAvailability::Quarantined)
+        .count();
+    let mut gaps = Vec::new();
+    if snapshot.parsed.projects.is_empty() {
+        gaps.push(CoverageGap::ProjectRelationshipsUnobserved);
+    }
+    if snapshot.parsed.canvas_documents.is_empty() {
+        gaps.push(CoverageGap::CanvasDocumentsUnobserved);
+    }
+    if snapshot.parsed.assets.is_empty() {
+        gaps.push(CoverageGap::AssetsUnobserved);
+    }
+    if missing_assets > 0 {
+        gaps.push(CoverageGap::AssetsMissing);
+    }
+    if quarantined_assets > 0 {
+        gaps.push(CoverageGap::AssetsQuarantined);
+    }
     ArchiveCompletenessReport {
         archive_id: snapshot.archive_id.clone(),
         schema_id: snapshot.parsed.schema_id.clone(),
@@ -206,13 +461,22 @@ fn archive_report(
             .iter()
             .map(|conversation| conversation.messages.len())
             .sum(),
+        projects_discovered: snapshot.parsed.projects.len(),
+        instructions_discovered: snapshot
+            .parsed
+            .projects
+            .iter()
+            .map(|project| project.instructions.len())
+            .sum(),
+        canvas_documents_discovered: snapshot.parsed.canvas_documents.len(),
+        asset_references_discovered: snapshot.parsed.assets.len(),
+        verified_assets,
+        missing_assets,
+        quarantined_assets,
         orphan_messages: warnings.len(),
         parse_warning_count: 0,
         warnings,
-        gaps: vec![
-            CoverageGap::ProjectRelationshipsUnobserved,
-            CoverageGap::AssetsUnobserved,
-        ],
+        gaps,
         revision_statistics,
         completeness: Completeness::StructurallyPartial,
     }
@@ -220,6 +484,9 @@ fn archive_report(
 
 fn cumulative_report(
     conversations: &[ConversationHistory],
+    projects: &[ProjectHistory],
+    canvas_documents: &[CanvasDocumentHistory],
+    assets: &[AssetHistory],
     archive_reports: &[ArchiveCompletenessReport],
 ) -> CumulativeCompletenessReport {
     let warnings = archive_reports
@@ -247,10 +514,19 @@ fn cumulative_report(
             .iter()
             .map(|conversation| conversation.messages.len())
             .sum(),
+        unique_projects: projects.len(),
+        unique_canvas_documents: canvas_documents.len(),
+        unique_assets: assets.len(),
         conversation_revisions: conversations
             .iter()
             .map(|conversation| conversation.revisions.len())
             .sum(),
+        project_revisions: projects.iter().map(|history| history.revisions.len()).sum(),
+        canvas_document_revisions: canvas_documents
+            .iter()
+            .map(|history| history.revisions.len())
+            .sum(),
+        asset_revisions: assets.iter().map(|history| history.revisions.len()).sum(),
         message_revisions: conversations
             .iter()
             .flat_map(|conversation| &conversation.messages)

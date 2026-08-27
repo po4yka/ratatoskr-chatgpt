@@ -1,0 +1,14 @@
+[
+  {
+    "id": "project-alpha",
+    "title": "Synthetic project",
+    "description": "Invented fixture only",
+    "instructions": [
+      { "id": "instruction-alpha", "kind": "instruction", "content": "Preserve evidence." },
+      { "id": "prompt-alpha", "kind": "system_prompt", "content": "Stay inert." }
+    ],
+    "conversation_ids": ["conversation-project"],
+    "asset_ids": ["asset-uploaded"],
+    "future_project_field": { "preserve": true }
+  }
+]
