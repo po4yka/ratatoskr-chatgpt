@@ -9,17 +9,82 @@
 //! SIGTERM or SIGINT, drain within the configured bound, shut telemetry down,
 //! exit 0.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use ratatoskr_chatgpt_archive::admin::{RuntimeState, admin_router};
 use ratatoskr_chatgpt_archive::config::Config;
 use ratatoskr_chatgpt_archive::persistence::{Database, PersistenceError};
+use ratatoskr_chatgpt_archive::portable_export::{
+    PortableArchiveExporter, PortableExportError, PortableExportFilter,
+};
 use ratatoskr_chatgpt_archive::receipt::ReceiptError;
 use ratatoskr_chatgpt_archive::receipt::auth::ConfigTenantAuthenticator;
 use ratatoskr_chatgpt_archive::receipt::http::{ReceiptApiState, router as receipt_router};
 use ratatoskr_chatgpt_archive::receipt::pg::PostgresReceiptRepository;
 use ratatoskr_chatgpt_archive::{ArchiveReceiver, BlobStore, init_telemetry};
+
+/// Parsed `portable-export` command arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableExportCommand {
+    /// Required tenant and optional record filters.
+    pub filter: PortableExportFilter,
+    /// Destination ZIP path.
+    pub output: PathBuf,
+}
+
+/// Command-line parsing failure.
+#[derive(Debug, thiserror::Error)]
+pub enum PortableExportCommandError {
+    /// The supplied invocation is incomplete or malformed.
+    #[error("portable-export arguments are invalid")]
+    Invalid,
+}
+
+/// Parses portable-export arguments after the subcommand name.
+///
+/// # Errors
+///
+/// Returns [`PortableExportCommandError`] when required arguments are absent.
+pub fn parse_portable_export_command<I, S>(
+    arguments: I,
+) -> Result<PortableExportCommand, PortableExportCommandError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut arguments = arguments
+        .into_iter()
+        .map(|argument| argument.as_ref().to_owned());
+    let mut tenant = None;
+    let mut output = None;
+    let mut project = None;
+    let mut observed_from = None;
+    let mut observed_to = None;
+    while let Some(flag) = arguments.next() {
+        let value = arguments
+            .next()
+            .ok_or(PortableExportCommandError::Invalid)?;
+        match flag.as_str() {
+            "--tenant" => tenant = Some(value),
+            "--output" => output = Some(PathBuf::from(value)),
+            "--project" => project = Some(value),
+            "--from" => observed_from = Some(value),
+            "--to" => observed_to = Some(value),
+            _ => return Err(PortableExportCommandError::Invalid),
+        }
+    }
+    Ok(PortableExportCommand {
+        filter: PortableExportFilter {
+            account_external_ref: tenant.ok_or(PortableExportCommandError::Invalid)?,
+            project_external_id: project,
+            observed_from_rfc3339: observed_from,
+            observed_to_rfc3339: observed_to,
+        },
+        output: output.ok_or(PortableExportCommandError::Invalid)?,
+    })
+}
 
 /// A failure that prevents the process from serving.
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +112,9 @@ pub enum ServiceError {
     /// loader: configuration refuses to start without one.
     #[error("the blob storage root is not configured")]
     MissingBlobRoot,
+    /// Portable export could not read or publish the selected evidence.
+    #[error("portable export failed")]
+    PortableExport(#[from] PortableExportError),
 }
 
 /// Resolves when SIGINT or SIGTERM arrives.
@@ -168,6 +236,33 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// Exports one configured tenant selection without starting the HTTP service.
+///
+/// # Errors
+///
+/// Returns [`ServiceError`] when storage, persistence, or output publication
+/// fails.
+pub async fn run_portable_export(
+    config: &Config,
+    command: &PortableExportCommand,
+) -> Result<(), ServiceError> {
+    let root = config
+        .storage
+        .blob_root
+        .clone()
+        .ok_or(ServiceError::MissingBlobRoot)?;
+    let database = Database::connect(&config.storage, &config.limits).await?;
+    database.apply_schema().await?;
+    let state = database
+        .load_portable_archive_state(&command.filter)
+        .await?;
+    let blob_store = BlobStore::new(&root)?;
+    PortableArchiveExporter::new()
+        .export_to_path_with_assets(&state, &blob_store, &command.output)
+        .await?;
+    Ok(())
+}
+
 /// The process entry point: configuration failures exit 78 (`EX_CONFIG`), other
 /// startup failures exit 1 with a value-free stderr line.
 ///
@@ -182,6 +277,16 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
               meaningful refusal path for a process that cannot schedule at all"
 )]
 pub fn main_result() -> ExitCode {
+    let mut arguments = std::env::args();
+    let _program = arguments.next();
+    let subcommand = arguments.next();
+    if subcommand.as_deref() == Some("portable-export") {
+        let Ok(command) = parse_portable_export_command(arguments) else {
+            eprintln!("ratatoskr-chatgpt-archive: portable-export requires --tenant and --output");
+            return ExitCode::from(64);
+        };
+        return portable_export_main(&command);
+    }
     let config = match Config::load() {
         Ok(config) => config,
         Err(error) => {
@@ -204,6 +309,36 @@ pub fn main_result() -> ExitCode {
         Err(error) => {
             tracing::error!(chain = %error, "the service stopped");
             eprintln!("ratatoskr-chatgpt-archive: the service stopped");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[allow(
+    clippy::expect_used,
+    reason = "runtime construction can only fail through an invalid builder"
+)]
+fn portable_export_main(command: &PortableExportCommand) -> ExitCode {
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("ratatoskr-chatgpt-archive: {error}");
+            return ExitCode::from(78);
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("building the async runtime must work");
+    let outcome = runtime.block_on(run_portable_export(&config, command));
+    runtime.shutdown_timeout(std::time::Duration::from_millis(
+        config.limits.shutdown_timeout_ms,
+    ));
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(chain = %error, "portable export failed");
+            eprintln!("ratatoskr-chatgpt-archive: portable export failed");
             ExitCode::FAILURE
         }
     }

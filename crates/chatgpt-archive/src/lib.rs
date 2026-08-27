@@ -55,6 +55,7 @@ pub use persistence::{Database, PersistenceError};
 
 pub mod outbox;
 pub mod parser_registry;
+pub mod portable_export;
 pub mod receipt;
 pub mod reconciliation;
 pub mod synthetic_parser;

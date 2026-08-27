@@ -1,6 +1,7 @@
 //! Integration tests for schema application. They skip unless
 //! `CHATGPT_TEST_DATABASE_URL` is set; CI always sets it.
 
+use ratatoskr_chatgpt_archive::portable_export::PortableExportFilter;
 use secrecy::SecretString;
 
 /// Every relation the first-version definition declares.
@@ -179,6 +180,97 @@ async fn equal_digests_coexist_across_accounts_only() -> Result<(), Box<dyn std:
         duplicate.is_err(),
         "one account cannot hold the same digest twice"
     );
+    Ok(())
+}
+
+/// The portable read model never selects normalized projections from another tenant.
+#[tokio::test]
+async fn portable_export_read_model_is_scoped_to_the_requested_tenant()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(url) = test_url() else {
+        eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
+        return Ok(());
+    };
+    let database = connected_database(&url).await?;
+    database.apply_schema().await?;
+    let run_tag = Uuid::now_v7().simple().to_string();
+    let alpha_ref = format!("portable-export-{run_tag}-alpha");
+    let beta_ref = format!("portable-export-{run_tag}-beta");
+    let alpha = insert_account(&database, &alpha_ref).await?;
+    let beta = insert_account(&database, &beta_ref).await?;
+    let alpha_export = Uuid::now_v7();
+    let beta_export = Uuid::now_v7();
+    insert_export(&database, alpha_export, Some(alpha), &digest('a')).await?;
+    insert_export(&database, beta_export, Some(beta), &digest('b')).await?;
+    let alpha_project = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.projects (id, account_id, external_id, title, last_seen_export) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(alpha_project)
+    .bind(alpha)
+    .bind("project-alpha")
+    .bind("Alpha")
+    .bind(alpha_export)
+    .execute(database.pool())
+    .await?;
+    let alpha_conversation = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.conversations (id, project_id, account_id, external_id, title, last_seen_export) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(alpha_conversation)
+    .bind(alpha_project)
+    .bind(alpha)
+    .bind("conversation-alpha")
+    .bind("Alpha conversation")
+    .bind(alpha_export)
+    .execute(database.pool())
+    .await?;
+    let alpha_message = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.messages (id, conversation_id, external_id, role, provider_metadata) VALUES ($1, $2, $3, 'user', '{}')",
+    )
+    .bind(alpha_message)
+    .bind(alpha_conversation)
+    .bind("message-alpha")
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.content_parts (id, message_id, ordinal, part_kind, payload) VALUES ($1, $2, 0, 'text', '{\"text\": \"alpha content\"}')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(alpha_message)
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.projects (id, account_id, external_id, title, last_seen_export) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(beta)
+    .bind("project-beta")
+    .bind("Beta")
+    .bind(beta_export)
+    .execute(database.pool())
+    .await?;
+
+    let state = database
+        .load_portable_archive_state(&PortableExportFilter {
+            account_external_ref: alpha_ref,
+            project_external_id: None,
+            observed_from_rfc3339: None,
+            observed_to_rfc3339: None,
+        })
+        .await?;
+
+    assert_eq!(state.projects.len(), 1);
+    assert_eq!(state.projects[0].external_id, "project-alpha");
+    assert_eq!(state.conversations.len(), 1);
+    assert_eq!(state.conversations[0].external_id, "conversation-alpha");
+    assert_eq!(
+        state.conversations[0].payload["messages"][0]["parts"][0]["payload"]["text"],
+        "alpha content",
+        "the read model must preserve ordered normalized message parts"
+    );
+    assert!(state.assets.is_empty());
     Ok(())
 }
 
