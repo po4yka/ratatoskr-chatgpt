@@ -11,7 +11,7 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Archive `synthetic-conversations-parser` with OpenSpec and confirm `openspec validate --archived` passes; commit the dedicated worktree branch, fast-forward `main`, push `main`, and remove only this task worktree and branch after the push is observed. This delivery task has no failing unit test because it archives and publishes already-validated work.
+- [x] 3.1 Archive `synthetic-conversations-parser` with OpenSpec and confirm `openspec validate --archived` passes; commit the dedicated worktree branch, fast-forward `main`, push `main`, and remove only this task worktree and branch after the push is observed. This delivery task has no failing unit test because it archives and publishes already-validated work.
 
 ## Follow-up blocker outside this change
 
