@@ -53,6 +53,7 @@ pub mod persistence;
 
 pub use persistence::{Database, PersistenceError};
 
+pub mod outbox;
 pub mod parser_registry;
 pub mod receipt;
 pub mod reconciliation;
@@ -71,6 +72,7 @@ pub use synthetic_parser::{
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+pub use outbox::{NormalizedArchiveEvent, OutboxError};
 pub use receipt::{
     AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome, ReceiptRepository,
     RepositoryError, RunRecord,

@@ -1397,6 +1397,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatoskr-ai-archive-contracts"
+version = "0.1.0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=9b700fc4de2a0f8c4d61115aaa563dd999dca18b#9b700fc4de2a0f8c4d61115aaa563dd999dca18b"
+dependencies = [
+ "ratatoskr-error-contracts",
+ "ratatoskr-event-envelope",
+ "ratatoskr-identifiers",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ratatoskr-chatgpt-archive"
 version = "0.1.0"
 dependencies = [
@@ -1409,8 +1424,10 @@ dependencies = [
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "ratatoskr-ai-archive-contracts",
  "ratatoskr-chatgpt-archive",
  "ratatoskr-error-contracts",
+ "ratatoskr-event-envelope",
  "ratatoskr-identifiers",
  "secrecy",
  "serde",
@@ -1450,7 +1467,22 @@ dependencies = [
 [[package]]
 name = "ratatoskr-error-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=d56c6891ce9b4fca2c65d43205080d9a666ab5a0#d56c6891ce9b4fca2c65d43205080d9a666ab5a0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=9b700fc4de2a0f8c4d61115aaa563dd999dca18b#9b700fc4de2a0f8c4d61115aaa563dd999dca18b"
+dependencies = [
+ "jiff",
+ "ratatoskr-identifiers",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ratatoskr-event-envelope"
+version = "0.1.0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=9b700fc4de2a0f8c4d61115aaa563dd999dca18b#9b700fc4de2a0f8c4d61115aaa563dd999dca18b"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -1465,7 +1497,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-identifiers"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=d56c6891ce9b4fca2c65d43205080d9a666ab5a0#d56c6891ce9b4fca2c65d43205080d9a666ab5a0"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=9b700fc4de2a0f8c4d61115aaa563dd999dca18b#9b700fc4de2a0f8c4d61115aaa563dd999dca18b"
 dependencies = [
  "jiff",
  "regex",
