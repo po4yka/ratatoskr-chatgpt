@@ -62,7 +62,7 @@
   the tracked-Rust file-length check, `build-gate -- cargo build --workspace --locked`,
   and `build-gate -- cargo test --workspace --locked`; inspect the final diff
   and tick only the completed tasks.
-- [ ] 5.3 Archive `reconcile-archive-revisions` with OpenSpec, verify
+- [x] 5.3 Archive `reconcile-archive-revisions` with OpenSpec, verify
   `openspec validate --archived`, commit the dedicated worktree branch,
   fast-forward `main`, push `main`, and remove only this task worktree and
   branch after the push is observed. This delivery task has no failing unit
