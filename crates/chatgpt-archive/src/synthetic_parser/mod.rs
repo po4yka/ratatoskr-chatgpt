@@ -15,7 +15,10 @@ pub use model::{
 };
 
 use crate::receipt::AcquisitionMode;
-use crate::{BlobStore, ExtractedArtifact, ParserId, ParserRegistration};
+use crate::{
+    BlobStore, ExtractedArtifact, ParserArtifactEvidence, ParserExecutionError,
+    ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration,
+};
 
 /// All immutable evidence available to the synthetic archive parser.
 #[derive(Debug)]
@@ -74,6 +77,38 @@ pub enum SyntheticParserError {
 /// Parser for the documented synthetic conversations shape.
 #[derive(Debug, Default)]
 pub struct SyntheticConversationsParser;
+
+impl ParserExecutor for SyntheticConversationsParser {
+    fn execute(
+        &self,
+        input: ParserExecutionInput<'_>,
+    ) -> Result<ParsedConversations, ParserExecutionError> {
+        let evidence = |name: &str| -> Option<&[u8]> {
+            input
+                .artifacts
+                .iter()
+                .find(|artifact: &&ParserArtifactEvidence| {
+                    artifact.path == name && !artifact.quarantined
+                })
+                .map(|artifact| artifact.bytes.as_ref())
+        };
+        let conversations = evidence("conversations.json").ok_or(ParserExecutionError::Failed)?;
+        let mut parsed = decode::parse_archive(
+            conversations,
+            evidence("projects.json"),
+            evidence("canvas.json"),
+            Self::registration().id,
+        )
+        .map_err(|_| ParserExecutionError::Failed)?;
+        // Asset declarations require async BlobStore verification. Refuse them
+        // here instead of silently claiming that unverified bytes were imported.
+        if evidence("assets.json").is_some() {
+            return Err(ParserExecutionError::Failed);
+        }
+        parsed.assets.clear();
+        Ok(parsed)
+    }
+}
 
 impl SyntheticConversationsParser {
     /// Returns the registry declaration for this parser.

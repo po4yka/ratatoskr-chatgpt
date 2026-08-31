@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::receipt::AcquisitionMode;
-use crate::receipt::report::raw_stored_partial;
 use crate::receipt::repository::{
     PublishRequest, PublishedExport, ReceiptRepository, RepoFuture, RepositoryError, RunRecord,
 };
@@ -96,6 +95,7 @@ struct State {
     advances: Vec<(Uuid, ImportState, ImportState)>,
     publishes: Vec<(Uuid, String, String, u64)>,
     operation_reports: Vec<serde_json::Value>,
+    pending_operations: Vec<(Uuid, Uuid, Uuid)>,
 }
 
 /// An in-memory [`ReceiptRepository`] for receiver tests.
@@ -149,6 +149,12 @@ impl FakeReceiptRepository {
     #[must_use]
     pub fn operation_reports(&self) -> Vec<serde_json::Value> {
         self.lock().operation_reports.clone()
+    }
+
+    /// Snapshots raw-durable operation bindings as `(operation, run, export)`.
+    #[must_use]
+    pub fn pending_operations(&self) -> Vec<(Uuid, Uuid, Uuid)> {
+        self.lock().pending_operations.clone()
     }
 
     /// Loads one run's fake record.
@@ -301,6 +307,34 @@ impl ReceiptRepository for FakeReceiptRepository {
         })
     }
 
+    fn bind_platform_operation(
+        &self,
+        existing_export_id: Uuid,
+        operation: crate::receipt::PlatformOperation,
+    ) -> RepoFuture<Result<(), RepositoryError>> {
+        let state = Arc::clone(&self.state);
+        Box::pin(async move {
+            let mut guard = state.lock().map_err(|_| backend("operations poisoned"))?;
+            let run_id = guard
+                .runs
+                .iter()
+                .find_map(|(run_id, run)| {
+                    (run.export_id == Some(existing_export_id)).then_some(*run_id)
+                })
+                .ok_or_else(|| backend("duplicate export has no run"))?;
+            if !guard
+                .pending_operations
+                .iter()
+                .any(|(operation_id, _, _)| *operation_id == operation.operation_id)
+            {
+                guard
+                    .pending_operations
+                    .push((operation.operation_id, run_id, existing_export_id));
+            }
+            Ok(())
+        })
+    }
+
     fn publish_export(
         &self,
         request: PublishRequest,
@@ -329,8 +363,8 @@ impl ReceiptRepository for FakeReceiptRepository {
             let ai_archive_id = Uuid::now_v7();
             if let Some(operation) = platform_operation {
                 guard
-                    .operation_reports
-                    .push(raw_stored_partial(operation, ai_archive_id)?);
+                    .pending_operations
+                    .push((operation.operation_id, run_id, export_id));
             }
             guard.exports.push(FakeExport {
                 export_id,

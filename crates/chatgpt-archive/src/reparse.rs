@@ -85,17 +85,17 @@ pub struct ReparsePlan {
     pub registry_fingerprint: String,
     /// Current normalized projection fingerprint.
     pub input_projection_fingerprint: String,
-    tenant_id: Uuid,
-    export_id: Uuid,
-    raw_ref: BlobRef,
-    inventory: ArchiveInventory,
-    artifacts: Vec<ParserArtifactEvidence>,
-    parsed: ParsedConversations,
-    current: BTreeMap<String, CurrentConversation>,
+    pub(crate) tenant_id: Uuid,
+    pub(crate) export_id: Uuid,
+    pub(crate) raw_ref: BlobRef,
+    pub(crate) inventory: ArchiveInventory,
+    pub(crate) artifacts: Vec<ParserArtifactEvidence>,
+    pub(crate) parsed: ParsedConversations,
+    pub(crate) current: BTreeMap<String, CurrentConversation>,
 }
 
 #[derive(Debug, Clone)]
-struct CurrentConversation {
+pub(crate) struct CurrentConversation {
     id: Uuid,
     digest: String,
 }
@@ -122,6 +122,9 @@ pub enum ReparseError {
     /// Extracted evidence could not be stored for apply.
     #[error("reparse artifact storage failed")]
     Blob(#[from] crate::BlobStoreError),
+    /// A terminal Platform operation result could not be constructed.
+    #[error("import result construction failed")]
+    Report(#[from] crate::receipt::RepositoryError),
 }
 
 /// Plans and applies exact parser replay over one retained raw archive.
@@ -400,7 +403,7 @@ async fn acquisition_mode_for_export(
     AcquisitionMode::parse(&mode).ok_or(ReparseError::Conflict)
 }
 
-async fn read_artifacts(
+pub(crate) async fn read_artifacts(
     blobs: &BlobStore,
     raw: &BlobRef,
     inventory: &ArchiveInventory,
@@ -439,7 +442,7 @@ async fn read_artifacts(
     .map_err(|_| ReparseError::Conflict)?
 }
 
-async fn current_projection(
+pub(crate) async fn current_projection(
     pool: &PgPool,
     export_id: Uuid,
 ) -> Result<BTreeMap<String, CurrentConversation>, sqlx::Error> {
@@ -470,7 +473,7 @@ async fn current_projection(
         .collect())
 }
 
-fn compare(
+pub(crate) fn compare(
     archive_id: Uuid,
     target_parser: ParserId,
     raw_digest: String,
@@ -555,7 +558,7 @@ fn parser_fingerprint(parsers: &[ParserId]) -> String {
     ))
 }
 
-async fn persist_artifacts(
+pub(crate) async fn persist_artifacts(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &ReparsePlan,
     references: &[BlobRef],
@@ -580,7 +583,7 @@ async fn persist_artifacts(
     Ok(())
 }
 
-async fn persist_projection(
+pub(crate) async fn persist_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &ReparsePlan,
 ) -> Result<(), ReparseError> {

@@ -290,7 +290,7 @@ impl ArchiveReceiver {
         .await
     }
 
-    /// Receives Platform-forwarded bytes and writes its terminal report into the same transaction.
+    /// Receives Platform-forwarded bytes and durably binds non-terminal import work.
     ///
     /// # Errors
     ///
@@ -433,6 +433,12 @@ impl ArchiveReceiver {
             .await
             .map_err(ReceiptError::Repository)?
         {
+            if let Some(operation) = platform_operation {
+                self.repository
+                    .bind_platform_operation(existing_export_id, operation)
+                    .await
+                    .map_err(ReceiptError::Repository)?;
+            }
             self.repository
                 .mark_run(context.run_id, &ImportState::Hashed, ImportState::Duplicate)
                 .await
@@ -469,6 +475,12 @@ impl ArchiveReceiver {
                 byte_length: context.byte_length,
             }),
             Err(RepositoryError::DuplicateExisting { existing_export_id }) => {
+                if let Some(operation) = platform_operation {
+                    self.repository
+                        .bind_platform_operation(existing_export_id, operation)
+                        .await
+                        .map_err(ReceiptError::Repository)?;
+                }
                 self.repository
                     .mark_run(context.run_id, &ImportState::Hashed, ImportState::Duplicate)
                     .await

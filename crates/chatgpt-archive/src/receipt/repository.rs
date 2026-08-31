@@ -143,6 +143,15 @@ pub trait ReceiptRepository: core::fmt::Debug + Send + Sync {
         sha256_hex: &str,
     ) -> RepoFuture<Result<Option<Uuid>, RepositoryError>>;
 
+    /// Binds a Platform operation to the import that already owns a duplicate
+    /// export. The operation identity is idempotent and never creates raw
+    /// evidence or a second import.
+    fn bind_platform_operation(
+        &self,
+        existing_export_id: Uuid,
+        operation: PlatformOperation,
+    ) -> RepoFuture<Result<(), RepositoryError>>;
+
     /// Records the export and moves its run to `stored` inside one
     /// transaction, returning the new export identity. Losing the race
     /// against an equal tenant digest surfaces as

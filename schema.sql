@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.import_runs (
     finished_at     TIMESTAMPTZ
 );
 
+-- One Platform operation bound to one durable local import. Raw receipt
+-- creates this correlation, while only import completion creates its outbox
+-- report. Several operations may reuse the same immutable export/import.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.platform_operation_imports (
+    operation_id      UUID PRIMARY KEY,
+    import_run_id     UUID NOT NULL REFERENCES chatgpt_archive.import_runs (id),
+    export_id         UUID NOT NULL REFERENCES chatgpt_archive.exports (id),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    reported_at       TIMESTAMPTZ
+);
+
 ALTER TABLE chatgpt_archive.import_runs
     ADD COLUMN IF NOT EXISTS parser_name TEXT;
 
@@ -207,6 +218,9 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.completeness_reports (
     unknown_variants  INTEGER NOT NULL DEFAULT 0,
     produced_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS completeness_reports_import_run_unique
+    ON chatgpt_archive.completeness_reports (import_run_id);
 
 -- Explicit deletion evidence only. Absence from a snapshot never lands here.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.tombstones (

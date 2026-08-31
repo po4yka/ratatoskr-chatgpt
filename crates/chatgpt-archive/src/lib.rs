@@ -54,6 +54,7 @@ pub mod persistence;
 
 pub use persistence::{Database, PersistenceError};
 
+mod initial_import;
 pub mod outbox;
 pub mod parser_migration;
 pub mod parser_registry;
@@ -62,6 +63,7 @@ pub mod privacy_deletion;
 pub mod receipt;
 pub mod reconciliation;
 pub mod reparse;
+pub use initial_import::InitialImportWorker;
 pub mod synthetic_parser;
 pub use parser_registry::{
     CompiledParser, ParserArtifactEvidence, ParserExecutionError, ParserExecutionInput,

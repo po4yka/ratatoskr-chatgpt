@@ -479,6 +479,9 @@ pub enum ServiceError {
     /// Fixture candidate inspection failed before a report could be produced.
     #[error("fixture admission failed")]
     FixtureAdmission(#[from] FixtureAdmissionError),
+    /// The compiled runtime parser set was internally inconsistent.
+    #[error("runtime parser registry failed")]
+    ParserRegistry(#[from] ratatoskr_chatgpt_archive::RegistryError),
 }
 
 /// Resolves when SIGINT or SIGTERM arrives.
@@ -518,13 +521,20 @@ async fn shutdown_signal() {
 async fn operation_report_loop(
     outbox: OperationReportOutbox,
     endpoint: String,
+    nkey_seed_path: std::path::PathBuf,
+    ready: Arc<std::sync::atomic::AtomicBool>,
     mut stopped: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
         if *stopped.borrow() {
             return;
         }
-        if outbox.publish_pending_once(&endpoint).await.is_err() {
+        let pass_ready = outbox
+            .publish_pending_once(&endpoint, &nkey_seed_path)
+            .await
+            .is_ok();
+        ready.store(pass_ready, std::sync::atomic::Ordering::Release);
+        if !pass_ready {
             metrics::counter!("chatgpt_archive_operation_report_publications_total", "outcome" => "failed")
                 .increment(1);
         }
@@ -537,6 +547,99 @@ async fn operation_report_loop(
             }
         }
     }
+}
+
+async fn initial_import_loop(
+    worker: ratatoskr_chatgpt_archive::InitialImportWorker,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        if *stopped.borrow() {
+            return;
+        }
+        let pass_ready = worker.process_pending_once().await.is_ok();
+        ready.store(pass_ready, std::sync::atomic::Ordering::Release);
+        if !pass_ready {
+            metrics::counter!("chatgpt_archive_import_passes_total", "outcome" => "failed")
+                .increment(1);
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(250)) => {},
+            changed = stopped.changed() => {
+                if changed.is_err() || *stopped.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn register_flag_check(
+    state: &RuntimeState,
+    name: &str,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    unavailable: &'static str,
+) {
+    state.register_check(name, move || {
+        let ready = Arc::clone(&ready);
+        async move {
+            ready
+                .load(std::sync::atomic::Ordering::Acquire)
+                .then_some(())
+                .ok_or_else(|| unavailable.to_owned())
+        }
+    });
+}
+
+fn start_initial_import_worker(
+    database: &Database,
+    blob: &BlobStore,
+    limits: &ratatoskr_chatgpt_archive::Limits,
+    state: &RuntimeState,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Result<tokio::task::JoinHandle<()>, ServiceError> {
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    register_flag_check(
+        state,
+        "initial_import_worker",
+        Arc::clone(&ready),
+        "initial import worker unavailable",
+    );
+    let registry = Arc::new(ratatoskr_chatgpt_archive::ParserRegistry::runtime()?);
+    let worker = ratatoskr_chatgpt_archive::InitialImportWorker::new(
+        database.pool().clone(),
+        blob.clone(),
+        registry,
+        limits.into(),
+    );
+    Ok(tokio::spawn(initial_import_loop(worker, ready, stopped)))
+}
+
+fn start_operation_reporter(
+    database: &Database,
+    config: &Config,
+    state: &RuntimeState,
+    stopped: tokio::sync::watch::Receiver<bool>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let (endpoint, nkey_seed_path) = (
+        config.receipt.event_bus_url.as_ref()?,
+        config.receipt.event_bus_nkey_seed_path.as_ref()?,
+    );
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    register_flag_check(
+        state,
+        "operation_report_publisher",
+        Arc::clone(&ready),
+        "operation report publisher unavailable",
+    );
+    Some(tokio::spawn(operation_report_loop(
+        OperationReportOutbox::new(database.pool().clone()),
+        endpoint.expose_secret().to_owned(),
+        nkey_seed_path.clone(),
+        ready,
+        stopped,
+    )))
 }
 
 /// Runs the service to completion.
@@ -559,6 +662,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     let state = Arc::new(RuntimeState::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut outbox_task = None;
+    let mut import_task = None;
 
     // Prepare the archive root before anything can write into it.
     let root = config
@@ -586,7 +690,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
         if let Some(staging_root) = config.storage.receipt_staging_root.clone() {
             let repository = PostgresReceiptRepository::new(database.pool().clone());
             let receiver = ArchiveReceiver::new(
-                blob,
+                blob.clone(),
                 Arc::new(repository),
                 staging_root,
                 config.limits.max_archive_bytes,
@@ -603,16 +707,17 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
                     &config.receipt.platform_accounts,
                 ),
             )));
+
+            import_task = Some(start_initial_import_worker(
+                &database,
+                &blob,
+                &config.limits,
+                &state,
+                shutdown_rx.clone(),
+            )?);
         }
 
-        if let Some(endpoint) = config.receipt.event_bus_url.as_ref() {
-            let endpoint = endpoint.expose_secret().to_owned();
-            let outbox = OperationReportOutbox::new(database.pool().clone());
-            let stopped = shutdown_rx.clone();
-            outbox_task = Some(tokio::spawn(operation_report_loop(
-                outbox, endpoint, stopped,
-            )));
-        }
+        outbox_task = start_operation_reporter(&database, config, &state, shutdown_rx.clone());
     }
 
     let listener = tokio::net::TcpListener::bind(config.admin.listen_address)
@@ -640,6 +745,13 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
         .map_err(ServiceError::Serve)?;
 
     if let Some(task) = outbox_task {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(config.limits.shutdown_timeout_ms),
+            task,
+        )
+        .await;
+    }
+    if let Some(task) = import_task {
         let _ = tokio::time::timeout(
             Duration::from_millis(config.limits.shutdown_timeout_ms),
             task,

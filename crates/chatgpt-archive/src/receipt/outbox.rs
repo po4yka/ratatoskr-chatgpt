@@ -3,7 +3,7 @@
 use sqlx::Row as _;
 
 /// Subject Platform consumes to project producer operation facts.
-const OPERATION_REPORTED_SUBJECT: &str = "evt.platform.operation.reported.v1";
+const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.chatgpt.operation.reported.v1";
 const BATCH_SIZE: i64 = 32;
 
 /// The persistent queue that delivers terminal receipt reports to `JetStream`.
@@ -29,8 +29,17 @@ impl OperationReportOutbox {
     ///
     /// Returns [`OutboxError`] when the broker does not acknowledge a message
     /// or the durable queue cannot be read or marked as published.
-    pub async fn publish_pending_once(&self, endpoint: &str) -> Result<usize, OutboxError> {
-        let client = async_nats::connect(endpoint)
+    pub async fn publish_pending_once(
+        &self,
+        endpoint: &str,
+        nkey_seed_path: &std::path::Path,
+    ) -> Result<usize, OutboxError> {
+        let seed = tokio::fs::read_to_string(nkey_seed_path)
+            .await
+            .map_err(OutboxError::broker)?;
+        let options = async_nats::ConnectOptions::with_nkey(seed.trim().to_owned());
+        let client = options
+            .connect(endpoint)
             .await
             .map_err(OutboxError::broker)?;
         let jetstream = async_nats::jetstream::new(client);

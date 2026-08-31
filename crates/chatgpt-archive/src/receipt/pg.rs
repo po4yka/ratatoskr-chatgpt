@@ -11,7 +11,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::AcquisitionMode;
-use super::report::raw_stored_partial;
 use super::repository::{
     PublishRequest, PublishedExport, ReceiptRepository, RepoFuture, RepositoryError, RunRecord,
 };
@@ -239,6 +238,41 @@ impl ReceiptRepository for PostgresReceiptRepository {
         })
     }
 
+    fn bind_platform_operation(
+        &self,
+        existing_export_id: Uuid,
+        operation: super::repository::PlatformOperation,
+    ) -> RepoFuture<Result<(), RepositoryError>> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let run_id: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT id FROM chatgpt_archive.import_runs \
+                 WHERE export_id = $1 ORDER BY started_at LIMIT 1",
+            )
+            .bind(existing_export_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(backend)?;
+            let (run_id,) = run_id.ok_or_else(|| {
+                RepositoryError::backend(std::io::Error::other(
+                    "duplicate export has no owning import run",
+                ))
+            })?;
+            sqlx::query(
+                "INSERT INTO chatgpt_archive.platform_operation_imports \
+                 (operation_id, import_run_id, export_id) VALUES ($1, $2, $3) \
+                 ON CONFLICT (operation_id) DO NOTHING",
+            )
+            .bind(operation.operation_id)
+            .bind(run_id)
+            .bind(existing_export_id)
+            .execute(&pool)
+            .await
+            .map_err(backend)?;
+            Ok(())
+        })
+    }
+
     fn publish_export(
         &self,
         request: PublishRequest,
@@ -307,12 +341,14 @@ impl ReceiptRepository for PostgresReceiptRepository {
             }
 
             if let Some(operation) = platform_operation {
-                let report = raw_stored_partial(operation, ai_archive_id)?;
                 sqlx::query(
-                    "INSERT INTO chatgpt_archive.outbox_events (event_type, aggregate_id, payload) VALUES ('platform.operation.reported.v1', $1, $2)",
+                    "INSERT INTO chatgpt_archive.platform_operation_imports \
+                     (operation_id, import_run_id, export_id) VALUES ($1, $2, $3) \
+                     ON CONFLICT (operation_id) DO NOTHING",
                 )
                 .bind(operation.operation_id)
-                .bind(report)
+                .bind(run_id)
+                .bind(export_id)
                 .execute(&mut *transaction)
                 .await
                 .map_err(backend)?;

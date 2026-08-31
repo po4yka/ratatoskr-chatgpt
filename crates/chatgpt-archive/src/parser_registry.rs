@@ -120,6 +120,20 @@ struct RegisteredParser {
     executor: Option<Arc<dyn ParserExecutor>>,
 }
 impl ParserRegistry {
+    /// Builds the compiled parser set used by the service runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError`] if the built-in declarations overlap.
+    pub fn runtime() -> Result<Self, RegistryError> {
+        let mut registry = Self::default();
+        registry.register_compiled(
+            crate::SyntheticConversationsParser::registration(),
+            Arc::new(crate::SyntheticConversationsParser),
+        )?;
+        Ok(registry)
+    }
+
     /// Registers a unique parser declaration.
     ///
     /// # Errors

@@ -20,7 +20,7 @@ use ratatoskr_chatgpt_archive::BlobStore;
 use ratatoskr_chatgpt_archive::receipt::auth::TenantPrincipal;
 use ratatoskr_chatgpt_archive::receipt::state::ImportState;
 use ratatoskr_chatgpt_archive::receipt::{
-    AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome,
+    AcquisitionMode, ArchiveReceiver, PlatformOperation, ReceiptError, ReceiptOutcome,
 };
 use ratatoskr_chatgpt_archive::test_support::{FakeReceiptRepository, FakeRun};
 use sha2::Digest as _;
@@ -145,6 +145,83 @@ async fn receive_fixture_bytes(
             stream,
         )
         .await
+}
+
+/// Platform receipt is only raw durable evidence. Parser/import completion is
+/// the first point allowed to create a terminal operation report.
+#[tokio::test]
+async fn raw_receipt_is_nonterminal_until_restart_safe_import_completes() {
+    let fixture = fixture(u64::MAX);
+    let bytes = b"synthetic-chatgpt-export";
+    let digest = hex::encode(sha2::Sha256::digest(bytes));
+    let (stream, _) = CountingStream::new(&[bytes]);
+    let operation_id = Uuid::now_v7();
+
+    fixture
+        .receiver
+        .receive_platform_archive(
+            &principal("acc-one"),
+            MEDIA_TYPE,
+            bytes.len() as u64,
+            &digest,
+            PlatformOperation { operation_id },
+            stream,
+        )
+        .await
+        .expect("verified raw receipt must be accepted");
+
+    assert!(
+        fixture.repository.operation_reports().is_empty(),
+        "raw persistence is nonterminal; import completion owns the report"
+    );
+    let (run_id, run) = fixture
+        .repository
+        .runs_snapshot()
+        .into_iter()
+        .next()
+        .expect("one durable run");
+    assert_eq!(run.state, ImportState::Stored);
+    assert_eq!(
+        fixture.repository.pending_operations(),
+        vec![(operation_id, run_id, run.export_id.expect("stored export"))]
+    );
+}
+
+#[tokio::test]
+async fn duplicate_digest_reports_terminal_result_for_each_bound_operation() {
+    let fixture = fixture(u64::MAX);
+    let bytes = b"same-chatgpt-export";
+    let digest = hex::encode(sha2::Sha256::digest(bytes));
+    let first_operation = Uuid::now_v7();
+    let second_operation = Uuid::now_v7();
+
+    for operation_id in [first_operation, second_operation] {
+        let (stream, _) = CountingStream::new(&[bytes]);
+        fixture
+            .receiver
+            .receive_platform_archive(
+                &principal("acc-one"),
+                MEDIA_TYPE,
+                bytes.len() as u64,
+                &digest,
+                PlatformOperation { operation_id },
+                stream,
+            )
+            .await
+            .expect("verified duplicate receipt must preserve its operation binding");
+    }
+
+    assert_eq!(fixture.repository.exports_snapshot().len(), 1);
+    let mut operations: Vec<_> = fixture
+        .repository
+        .pending_operations()
+        .into_iter()
+        .map(|(operation, _, _)| operation)
+        .collect();
+    operations.sort_unstable();
+    let mut expected = vec![first_operation, second_operation];
+    expected.sort_unstable();
+    assert_eq!(operations, expected);
 }
 
 /// A multi-chunk upload hashes incrementally, stages, publishes, and records

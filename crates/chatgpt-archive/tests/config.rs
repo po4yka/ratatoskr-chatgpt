@@ -156,18 +156,68 @@ fn absolute_staging_root_loads() {
     );
 }
 
-/// The receipt publisher gets its broker endpoint only from the closed,
-/// explicit configuration surface.
+/// Enabling operation publication without a service credential must fail
+/// before the receipt runtime can claim readiness.
 #[test]
-fn event_bus_url_loads_without_rendering_its_value() {
+fn event_bus_url_requires_nkey_seed_path() {
+    let loaded = Config::from_environment(entries(&[
+        ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        ("RATATOSKR__RECEIPT__EVENT_BUS_URL", "nats://127.0.0.1:4222"),
+    ]));
+
+    let error = loaded.expect_err("a report endpoint without credentials must fail closed");
+    assert!(error.violations.iter().any(|violation| {
+        violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH"
+            && violation.rule == "is required when the event bus URL is configured"
+    }));
+    assert!(!format!("{error}").contains("127.0.0.1:4222"));
+}
+
+#[test]
+fn platform_receipt_mapping_requires_report_bus_and_nkey() {
+    let loaded = Config::from_environment(entries(&[
+        ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        (
+            "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS",
+            "018f0000-0000-7000-8000-000000000001=owner",
+        ),
+    ]));
+
+    let error =
+        loaded.expect_err("Platform receipt must not start without its terminal report bus");
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_URL")
+    );
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| { violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH" })
+    );
+}
+
+#[test]
+fn event_bus_url_and_nkey_seed_path_load_without_rendering_values() {
     let config = Config::from_environment(entries(&[
         ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
         ("RATATOSKR__RECEIPT__EVENT_BUS_URL", "nats://127.0.0.1:4222"),
+        (
+            "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH",
+            "/run/credentials/chatgpt.nkey",
+        ),
     ]))
-    .expect("a NATS endpoint must load");
+    .expect("a credentialed NATS publisher must load");
 
-    assert!(config.receipt.event_bus_url.is_some());
-    assert!(!format!("{:?}", config.receipt).contains("127.0.0.1:4222"));
+    assert_eq!(
+        config.receipt.event_bus_nkey_seed_path,
+        Some(PathBuf::from("/run/credentials/chatgpt.nkey"))
+    );
+    let rendered = format!("{:?}", config.receipt);
+    assert!(!rendered.contains("127.0.0.1:4222"));
+    assert!(!rendered.contains("chatgpt.nkey"));
 }
 
 /// Tenant tokens parse into their token-and-account pairs.
@@ -200,6 +250,11 @@ fn tenant_tokens_parse_into_secret_pairs() {
 fn platform_account_mappings_parse_as_uuid_to_account_pairs() {
     let config = Config::from_environment(entries(&[
         ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs"),
+        ("RATATOSKR__RECEIPT__EVENT_BUS_URL", "nats://127.0.0.1:4222"),
+        (
+            "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH",
+            "/run/credentials/chatgpt.nkey",
+        ),
         (
             "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS",
             "00000000-0000-0000-0000-000000000011=acc-one",

@@ -79,7 +79,7 @@ async fn run_reparse(
     let engine = ReparseEngine::new(
         database.pool().clone(),
         BlobStore::new(&root)?,
-        Arc::new(ParserRegistry::default()),
+        Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
     );
     let plan = engine
@@ -113,7 +113,7 @@ async fn run_parser_migrate(
     let reparse = ReparseEngine::new(
         database.pool().clone(),
         BlobStore::new(&root)?,
-        Arc::new(ParserRegistry::default()),
+        Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
     );
     let engine = ParserMigrationEngine::new(reparse);

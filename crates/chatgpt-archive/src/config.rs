@@ -53,7 +53,7 @@ impl core::fmt::Debug for TenantToken {
 }
 
 /// Archive receipt configuration.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ReceiptConfig {
     /// Bearer tokens that may authenticate a receipt, one per tenant.
     #[serde(skip_serializing)]
@@ -63,6 +63,21 @@ pub struct ReceiptConfig {
     /// Optional NATS endpoint used to publish the durable receipt outbox.
     #[serde(skip_serializing)]
     pub event_bus_url: Option<SecretString>,
+    /// Absolute `NATS` `NKey` seed path used by the `ChatGPT` service identity.
+    #[serde(skip_serializing)]
+    pub event_bus_nkey_seed_path: Option<PathBuf>,
+}
+
+impl core::fmt::Debug for ReceiptConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ReceiptConfig")
+            .field("tenant_tokens", &self.tenant_tokens)
+            .field("platform_accounts", &self.platform_accounts)
+            .field("event_bus_url", &"[REDACTED]")
+            .field("event_bus_nkey_seed_path", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Loopback operator listener configuration.
@@ -222,6 +237,28 @@ impl Config {
                 rule: "is required",
             });
         }
+        if !config.receipt.platform_accounts.is_empty()
+            && config.receipt.event_bus_url.is_none()
+            && !violations
+                .iter()
+                .any(|violation| violation.key == KEY_EVENT_BUS_URL)
+        {
+            violations.push(Violation {
+                key: KEY_EVENT_BUS_URL.to_owned(),
+                rule: "is required when Platform account mappings are configured",
+            });
+        }
+        if (config.receipt.event_bus_url.is_some() || !config.receipt.platform_accounts.is_empty())
+            && config.receipt.event_bus_nkey_seed_path.is_none()
+            && !violations
+                .iter()
+                .any(|violation| violation.key == KEY_EVENT_BUS_NKEY_SEED_PATH)
+        {
+            violations.push(Violation {
+                key: KEY_EVENT_BUS_NKEY_SEED_PATH.to_owned(),
+                rule: "is required when the event bus URL is configured",
+            });
+        }
 
         if violations.is_empty() {
             Ok(config)
@@ -248,6 +285,7 @@ const KEY_RECEIPT_STAGING_ROOT: &str = "RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT
 const KEY_TENANT_TOKENS: &str = "RATATOSKR__RECEIPT__TENANT_TOKENS";
 const KEY_PLATFORM_ACCOUNTS: &str = "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS";
 const KEY_EVENT_BUS_URL: &str = "RATATOSKR__RECEIPT__EVENT_BUS_URL";
+const KEY_EVENT_BUS_NKEY_SEED_PATH: &str = "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH";
 
 #[allow(
     clippy::too_many_lines,
@@ -389,6 +427,10 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 violations.push(refused("must be a nats:// or tls:// endpoint"));
             }
         }
+        KEY_EVENT_BUS_NKEY_SEED_PATH => match parse_absolute_path(value) {
+            Ok(path) => config.receipt.event_bus_nkey_seed_path = Some(path),
+            Err(()) => violations.push(refused("must be an absolute file path")),
+        },
         _ => violations.push(refused("is not recognized")),
     }
 }
@@ -440,6 +482,7 @@ impl Default for Config {
                 tenant_tokens: Vec::new(),
                 platform_accounts: Vec::new(),
                 event_bus_url: None,
+                event_bus_nkey_seed_path: None,
             },
             limits: Limits {
                 database_connections: 8,

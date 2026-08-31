@@ -336,10 +336,9 @@ async fn platform_archive_receipt_route_is_available() {
     assert_eq!(status, StatusCode::ACCEPTED);
 }
 
-/// Raw storage is terminally truthful: until the parser has established
-/// normalized coverage, Platform receives exactly one partial/unknown report.
+/// Raw storage retains the operation correlation but is not terminal before import.
 #[tokio::test]
-async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() {
+async fn platform_archive_receipt_records_nonterminal_import_work() {
     let fixture = fixture(u64::MAX);
     let total: u64 = GOOD_BODY.iter().map(|chunk| chunk.len() as u64).sum();
     let mut request = request_at(
@@ -390,23 +389,19 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
 
     assert_eq!(status, StatusCode::ACCEPTED);
     let reports = fixture.repository.operation_reports();
-    assert_eq!(reports.len(), 1, "one receipt creates one terminal report");
-    assert_eq!(
-        reports[0]["operation_id"],
-        "00000000-0000-0000-0000-000000000014"
+    assert!(
+        reports.is_empty(),
+        "raw persistence cannot create a terminal report"
     );
-    assert_eq!(reports[0]["status"], "partially_succeeded");
+    let pending = fixture.repository.pending_operations();
     assert_eq!(
-        reports[0]["results"][0]["ai_archive_import_summary"]["provider"],
-        "chatgpt"
-    );
-    assert_eq!(
-        reports[0]["results"][0]["ai_archive_import_summary"]["completeness"],
-        "unknown"
+        pending.len(),
+        1,
+        "one durable operation correlation is queued"
     );
     assert_eq!(
-        reports[0]["results"][0]["ai_archive_import_summary"]["gap_count"],
-        1
+        pending[0].0,
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000014").expect("operation id parses")
     );
 }
 
