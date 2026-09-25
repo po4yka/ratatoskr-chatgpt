@@ -23,19 +23,19 @@ ratatoskr-operation-contracts  = { git = "https://github.com/po4yka/ratatoskr-co
 ratatoskr-event-envelope       = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "66d9454737d86d93f49ead96c0f028c2aeda02ff" }
 
 # ---- async runtime and HTTP ----
-tokio           = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-async-nats      = "=0.50.0"
-axum            = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-tower           = { version = "=0.5.3", features = ["util"] }
-tower-http      = { version = "=0.6.11", default-features = false, features = ["catch-panic"] }
-http            = "=1.5.0"
-http-body-util  = "=0.1.5"
+tokio           = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+async-nats      = "0.50.0"
+axum            = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+tower           = { version = "0.5.3", features = ["util"] }
+tower-http      = { version = "0.6.11", default-features = false, features = ["catch-panic"] }
+http            = "1.5.0"
+http-body-util  = "0.1.5"
 
 # ---- persistence ----
 # No `migrate` feature: the schema is one file, `include_str!`d into the binary by
 # `ratatoskr-chatgpt-archive`, so a deployment cannot drift from its schema and there is no
 # ledger to record.
-sqlx = { version = "=0.8.6", default-features = false, features = [
+sqlx = { version = "0.8.6", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",
     "postgres",
@@ -43,34 +43,34 @@ sqlx = { version = "=0.8.6", default-features = false, features = [
 ] }
 
 # ---- configuration and secrets ----
-secrecy = "=0.10.3"
+secrecy = "0.10.3"
 
 # ---- telemetry ----
-tracing                     = "=0.1.44"
-tracing-subscriber          = { version = "=0.3.23", default-features = false, features = ["std", "registry", "env-filter", "fmt", "json"] }
-metrics                     = "=0.24.6"
-metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
+tracing                     = "0.1.44"
+tracing-subscriber          = { version = "0.3.23", default-features = false, features = ["std", "registry", "env-filter", "fmt", "json"] }
+metrics                     = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 
 # ---- hashing, streams and identifiers ----
-bytes         = "=1.12.1"
-futures-core  = "=0.3.31"
-futures-util  = { version = "=0.3.31", default-features = false, features = ["std"] }
+bytes         = "1.12.1"
+futures-core  = "0.3.31"
+futures-util  = { version = "0.3.31", default-features = false, features = ["std"] }
 
 # ---- hashing and identifiers ----
-sha2 = "=0.10.9"
-hex  = "=0.4.3"
+sha2 = "0.10.9"
+hex  = "0.4.3"
 # `v7` because ratatoskr-contracts mints UUIDv7 for internally minted identity, and the database
 # stores the same bytes; schema.sql deliberately carries no id DEFAULT that could produce v4.
-uuid = { version = "=1.24.1", features = ["v7"] }
-zip  = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+uuid = { version = "1.24.1", features = ["v7"] }
+zip  = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # ---- serialization and errors ----
-serde      = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-thiserror  = "=2.0.20"
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror  = "2.0.20"
 
 # ---- test-only ----
-tempfile = "=3.27.0"
+tempfile = "3.27.0"
 
 [workspace.lints.rust]
 unsafe_code                   = "forbid"
