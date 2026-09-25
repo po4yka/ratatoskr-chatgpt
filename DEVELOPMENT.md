@@ -33,12 +33,16 @@ openspec validate --archived
 
 ```bash
 cargo fetch --locked
-cargo deny check
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked
 cargo test --workspace --locked
 ```
+
+`cargo deny check` is not in this list: it runs in its own `deny` job in `ci.yml`, separate from
+the gate, so a new RustSec advisory cannot hide a clippy or test failure behind it. It reads
+RustSec advisories, the licence set, duplicate versions and the source policy. Run it locally with
+`cargo deny check` before a commit the same as the gate list above.
 
 This list and the `- run: cargo` lines in `ci.yml`'s `gate` job are enforced identical by that
 workflow's last step. `CHATGPT_TEST_DATABASE_URL` must point at a PostgreSQL 17 for
