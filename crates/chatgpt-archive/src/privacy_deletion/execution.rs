@@ -463,7 +463,7 @@ async fn insert_tombstones(
             "evidence_ref": report.evidence_ref,
             "observed_at": report.completed_at,
         }))?;
-        let event = NormalizedArchiveEvent::tombstoned(payload)?;
+        let event = NormalizedArchiveEvent::tombstoned(&payload)?;
         sqlx::query(
             "INSERT INTO chatgpt_archive.outbox_events
              (event_type, aggregate_id, tenant_id, payload, correlation_id, deduplication_key)
@@ -473,7 +473,7 @@ async fn insert_tombstones(
         .bind(event.event_type)
         .bind(event.aggregate_id)
         .bind(durable.tenant_id)
-        .bind(event.payload)
+        .bind(serde_json::to_value(&event.envelope)?)
         .bind(durable.correlation_id)
         .bind(format!("privacy-delete:{}:{subject}", report.request_id))
         .execute(&mut **transaction)

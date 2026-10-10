@@ -41,6 +41,7 @@ zip.workspace = true
 test-support = []
 
 [dev-dependencies]
+nkeys.workspace = true
 sqlx.workspace = true
 http-body-util.workspace = true
 ratatoskr-chatgpt-archive = { path = ".", features = ["test-support"] }

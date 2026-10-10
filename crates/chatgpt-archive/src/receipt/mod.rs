@@ -14,7 +14,7 @@ pub mod state;
 
 use crate::receipt::state::ImportState;
 
-pub use outbox::OperationReportOutbox;
+pub use outbox::{ArchiveEventOutbox, PublishError};
 pub use repository::{
     PlatformOperation, PublishRequest, PublishedExport, ReceiptRepository, RepositoryError,
     RunRecord,

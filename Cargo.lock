@@ -1695,6 +1695,7 @@ dependencies = [
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "nkeys",
  "ratatoskr-ai-archive-contracts",
  "ratatoskr-chatgpt-archive",
  "ratatoskr-error-contracts",

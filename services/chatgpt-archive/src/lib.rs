@@ -26,7 +26,7 @@ use ratatoskr_chatgpt_archive::portable_export::{
     PortableArchiveExporter, PortableExportError, PortableExportFilter,
 };
 use ratatoskr_chatgpt_archive::privacy_deletion::{PrivacyDeletionError, PrivacyDeletionScope};
-use ratatoskr_chatgpt_archive::receipt::OperationReportOutbox;
+use ratatoskr_chatgpt_archive::receipt::ArchiveEventOutbox;
 use ratatoskr_chatgpt_archive::receipt::ReceiptError;
 use ratatoskr_chatgpt_archive::receipt::auth::ConfigTenantAuthenticator;
 use ratatoskr_chatgpt_archive::receipt::http::{ReceiptApiState, router as receipt_router};
@@ -482,6 +482,10 @@ pub enum ServiceError {
     /// The compiled runtime parser set was internally inconsistent.
     #[error("runtime parser registry failed")]
     ParserRegistry(#[from] ratatoskr_chatgpt_archive::RegistryError),
+    /// The archive event publisher met a row it can never deliver and stopped. The
+    /// service reports not ready and exits instead of serving with events stuck.
+    #[error("the archive event publisher stopped on a row it cannot deliver")]
+    EventPublisherStopped,
 }
 
 /// Resolves when SIGINT or SIGTERM arrives.
@@ -518,25 +522,35 @@ async fn shutdown_signal() {
 }
 
 /// Runs bounded publication passes until the owning service starts shutdown.
-async fn operation_report_loop(
-    outbox: OperationReportOutbox,
+///
+/// A broker that is down or refusing keeps the loop alive and the readiness check
+/// failing. A row the publisher can never deliver (an event type or document this
+/// service does not produce) stops the loop for good: readiness goes false, the
+/// service is told through `fatal`, and it exits non-zero instead of serving.
+async fn archive_event_loop(
+    outbox: ArchiveEventOutbox,
     endpoint: String,
     nkey_seed_path: std::path::PathBuf,
     ready: Arc<std::sync::atomic::AtomicBool>,
+    fatal: tokio::sync::watch::Sender<bool>,
     mut stopped: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
         if *stopped.borrow() {
             return;
         }
-        let pass_ready = outbox
+        let pass = outbox
             .publish_pending_once(&endpoint, &nkey_seed_path)
-            .await
-            .is_ok();
-        ready.store(pass_ready, std::sync::atomic::Ordering::Release);
-        if !pass_ready {
+            .await;
+        ready.store(pass.is_ok(), std::sync::atomic::Ordering::Release);
+        if let Err(error) = &pass {
             metrics::counter!("chatgpt_archive_operation_report_publications_total", "outcome" => "failed")
                 .increment(1);
+            if error.is_fatal() {
+                tracing::error!(%error, "the archive event publisher cannot continue");
+                let _ = fatal.send(true);
+                return;
+            }
         }
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(2)) => {},
@@ -620,6 +634,7 @@ fn start_operation_reporter(
     database: &Database,
     config: &Config,
     state: &RuntimeState,
+    fatal: tokio::sync::watch::Sender<bool>,
     stopped: tokio::sync::watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let (endpoint, nkey_seed_path) = (
@@ -631,13 +646,14 @@ fn start_operation_reporter(
         state,
         "operation_report_publisher",
         Arc::clone(&ready),
-        "operation report publisher unavailable",
+        "archive event publisher unavailable",
     );
-    Some(tokio::spawn(operation_report_loop(
-        OperationReportOutbox::new(database.pool().clone()),
+    Some(tokio::spawn(archive_event_loop(
+        ArchiveEventOutbox::new(database.pool().clone()),
         endpoint.expose_secret().to_owned(),
         nkey_seed_path.clone(),
         ready,
+        fatal,
         stopped,
     )))
 }
@@ -661,6 +677,8 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
 
     let state = Arc::new(RuntimeState::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (fatal_tx, mut fatal_rx) = tokio::sync::watch::channel(false);
+    let publisher_stopped = fatal_tx.subscribe();
     let mut outbox_task = None;
     let mut import_task = None;
 
@@ -717,7 +735,13 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
             )?);
         }
 
-        outbox_task = start_operation_reporter(&database, config, &state, shutdown_rx.clone());
+        outbox_task = start_operation_reporter(
+            &database,
+            config,
+            &state,
+            fatal_tx.clone(),
+            shutdown_rx.clone(),
+        );
     }
 
     let listener = tokio::net::TcpListener::bind(config.admin.listen_address)
@@ -738,28 +762,35 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+            tokio::select! {
+                () = shutdown_signal() => {},
+                _ = fatal_rx.changed() => {},
+            }
             let _ = shutdown_tx.send(true);
         })
         .await
         .map_err(ServiceError::Serve)?;
 
-    if let Some(task) = outbox_task {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(config.limits.shutdown_timeout_ms),
-            task,
-        )
-        .await;
-    }
-    if let Some(task) = import_task {
-        let _ = tokio::time::timeout(
-            Duration::from_millis(config.limits.shutdown_timeout_ms),
-            task,
-        )
-        .await;
-    }
+    await_background_tasks(
+        Duration::from_millis(config.limits.shutdown_timeout_ms),
+        [outbox_task, import_task],
+    )
+    .await;
 
+    if *publisher_stopped.borrow() {
+        return Err(ServiceError::EventPublisherStopped);
+    }
     Ok(())
+}
+
+/// Gives each background task the shutdown bound to finish its current pass.
+async fn await_background_tasks(
+    bound: Duration,
+    tasks: impl IntoIterator<Item = Option<tokio::task::JoinHandle<()>>>,
+) {
+    for task in tasks.into_iter().flatten() {
+        let _ = tokio::time::timeout(bound, task).await;
+    }
 }
 
 /// Exports one configured tenant selection without starting the HTTP service.

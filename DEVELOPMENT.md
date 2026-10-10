@@ -49,6 +49,12 @@ workflow's last step. `CHATGPT_TEST_DATABASE_URL` must point at a PostgreSQL 17 
 `crates/chatgpt-archive/tests/persistence_schema.rs`; without it those tests skip locally, while CI
 always sets it from its service container.
 
+The archive-fact, privacy-deletion and event-pump tests are stricter: each creates its own disposable
+database on that server, so the URL's role needs `CREATEDB`, and the pump tests publish to a real
+JetStream named by `CHATGPT_TEST_NATS_URL` (a `nats-server -js`). Those tests fail rather than skip
+when either variable is unset, because a skipped broker test proves nothing about delivery. CI starts
+the broker in the `Start disposable JetStream` step of `ci.yml`; locally `docker compose up -d postgres nats` starts both, on `127.0.0.1:5439` and `127.0.0.1:4229`.
+
 ## Workflow
 
 1. Treat every export as hostile and persist the immutable raw archive before parsing.

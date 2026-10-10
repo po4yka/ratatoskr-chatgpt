@@ -80,7 +80,7 @@ pub use synthetic_parser::{
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
-pub use outbox::{NormalizedArchiveEvent, OutboxError};
+pub use outbox::{NormalizedArchiveEvent, OutboxError, OutboxPlacement};
 pub use receipt::{
     AcquisitionMode, ArchiveReceiver, ReceiptError, ReceiptOutcome, ReceiptRepository,
     RepositoryError, RunRecord,

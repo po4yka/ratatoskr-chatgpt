@@ -243,7 +243,24 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     correlation_id  UUID,
     deduplication_key TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at    TIMESTAMPTZ
+    published_at    TIMESTAMPTZ,
+    -- Publication retries: a refused row backs off without starving the rows behind it.
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The payload is always the complete event envelope. The publisher maps the type to a
+    -- subject through a closed table, so a type outside this list could never be delivered.
+    CONSTRAINT outbox_event_type_closed CHECK (event_type IN (
+        'platform.operation.reported.v1',
+        'ai_archive.archive.imported.v1',
+        'ai_archive.conversation.added.v1',
+        'ai_archive.conversation.updated.v1',
+        'ai_archive.project.added.v1',
+        'ai_archive.project.updated.v1',
+        'ai_archive.artifact.added.v1',
+        'ai_archive.artifact.updated.v1',
+        'ai_archive.subject.tombstoned.v1'
+    ))
 );
 
 -- Existing development databases are disposable, but repeatable application
