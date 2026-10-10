@@ -33,7 +33,8 @@ async fn run_privacy_delete(
         .ok_or(ServiceError::MissingBlobRoot)?;
     let database = Database::connect(&config.storage, &config.limits).await?;
     database.apply_schema().await?;
-    let service = PrivacyDeletionService::new(database.pool().clone(), BlobStore::new(&root)?);
+    let service = PrivacyDeletionService::new(database.pool().clone(), BlobStore::new(&root)?)
+        .with_platform_users(config.receipt.platform_accounts.clone());
     match command {
         PrivacyDeleteCommand::Plan {
             tenant_id,

@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::{DeletionAction, DeletionInventoryItem, DeletionPlan, PrivacyDeletionScope};
 use crate::BlobStore;
+use crate::owner::OwnerResolver;
 
 /// Privacy deletion planning or execution failure without source content.
 #[derive(Debug, thiserror::Error)]
@@ -38,8 +39,11 @@ pub enum PrivacyDeletionError {
 pub enum FinalizationFault {
     /// Execute without an injected fault.
     None,
-    /// Fail after the first selected database row is removed.
+    /// Fail after the first selected database row is removed, rolling the rows back.
     AfterFirstRemoval,
+    /// Fail after the rows commit and before any byte is erased, as a crash between
+    /// the row phase and the byte phase would.
+    AfterRowsCommitted,
 }
 
 /// Coordinates tenant-locked privacy deletion state and exact blob erasure.
@@ -47,13 +51,30 @@ pub enum FinalizationFault {
 pub struct PrivacyDeletionService {
     pub(super) pool: PgPool,
     pub(super) blobs: BlobStore,
+    pub(super) owners: OwnerResolver,
 }
 
 impl PrivacyDeletionService {
     /// Creates a service over the process-owned pool and `BlobStore`.
     #[must_use]
     pub fn new(pool: PgPool, blobs: BlobStore) -> Self {
-        Self { pool, blobs }
+        Self {
+            pool,
+            blobs,
+            owners: OwnerResolver::default(),
+        }
+    }
+
+    /// Binds archive accounts to the Platform users that own their tombstones.
+    ///
+    /// `platform_accounts` pairs each Platform user with the external reference of the
+    /// account that user's archives arrive under. A deletion of an account that
+    /// appears in no pair still completes, queues no tombstone, and counts the skip
+    /// as `downstream_tombstone_unbound` in its completion report.
+    #[must_use]
+    pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
+        self.owners = OwnerResolver::new(platform_accounts);
+        self
     }
 
     /// Persists a deterministic, content-free preflight inventory.
@@ -328,6 +349,28 @@ async fn add_source_rows(
     {
         inventory.push("raw_record", id, DeletionAction::Remove);
     }
+    for id in uuid_rows(
+        transaction,
+        "SELECT operation_id FROM chatgpt_archive.platform_operation_imports
+         WHERE export_id = ANY($1)
+            OR import_run_id IN (SELECT id FROM chatgpt_archive.import_runs
+                                 WHERE export_id = ANY($1))
+         ORDER BY operation_id",
+        export_ids,
+    )
+    .await?
+    {
+        inventory.push("platform_operation_import", id, DeletionAction::Remove);
+    }
+    for id in uuid_rows(
+        transaction,
+        "SELECT id FROM chatgpt_archive.reparse_runs WHERE export_id = ANY($1) ORDER BY id",
+        export_ids,
+    )
+    .await?
+    {
+        inventory.push("reparse_run", id, DeletionAction::Remove);
+    }
     Ok(())
 }
 
@@ -552,9 +595,13 @@ async fn add_delivery_rows(
     for id in inbox {
         inventory.push("inbox_event", id, DeletionAction::Remove);
     }
+    // An unpublished tombstone is the only record that Knowledge must delete what this
+    // archive no longer holds, so no later deletion may take it with the tenant's rows.
     let outbox: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM chatgpt_archive.outbox_events
-         WHERE tenant_id = $1 AND ($2 OR export_id = ANY($3)) ORDER BY id",
+         WHERE tenant_id = $1 AND ($2 OR export_id = ANY($3))
+           AND NOT (event_type = 'ai_archive.subject.tombstoned.v1' AND published_at IS NULL)
+         ORDER BY id",
     )
     .bind(tenant_id)
     .bind(all_tenant)

@@ -322,10 +322,16 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.privacy_deletion_requests (
     tenant_id          UUID NOT NULL,
     scope_kind         TEXT NOT NULL CHECK (scope_kind IN ('archive', 'conversation', 'tenant')),
     scope_id           UUID,
-    status             TEXT NOT NULL CHECK (status IN ('planned', 'purging', 'finalizing', 'completed', 'failed')),
+    -- planned: nothing removed. purging: the rows are gone and the listed bytes are being
+    -- erased. completed: audit written, items dropped.
+    status             TEXT NOT NULL CHECK (status IN ('planned', 'purging', 'completed', 'failed')),
     correlation_id     UUID,
     completion_report  JSONB,
     error_code         TEXT,
+    -- The content-free evidence blob, stored before any row is removed.
+    evidence_ref       JSONB,
+    -- When the rows were removed; the observation instant of the tombstones.
+    rows_removed_at    TIMESTAMPTZ,
     requested_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at       TIMESTAMPTZ,
     CONSTRAINT privacy_deletion_scope_shape CHECK (
