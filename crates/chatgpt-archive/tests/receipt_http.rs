@@ -282,6 +282,50 @@ async fn wrong_method_answers_405() {
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// The capability probe needs no header and no claim (CONTRACTS.md S06 D2).
+#[tokio::test]
+async fn capabilities_document_is_served_without_claims() {
+    let fixture = fixture(u64::MAX);
+    let request = Request::builder()
+        .method("GET")
+        .uri(ratatoskr_ai_archive_contracts::platform_receipt::CAPABILITIES_PATH)
+        .body(Body::empty())
+        .expect("request builds");
+
+    let (status, json) = send(&fixture.app, request).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        ratatoskr_ai_archive_contracts::platform_receipt::receipt_capability_document("chatgpt")
+    );
+}
+
+/// Edge replaces any non-JSON non-2xx with `edge.upstream_invalid_response`, so
+/// even a method the route does not accept answers an error envelope (S06 D1).
+#[tokio::test]
+async fn receipt_route_rejects_a_non_post_method_with_an_error_envelope() {
+    let fixture = fixture(u64::MAX);
+    let (status, json) = send(
+        &fixture.app,
+        request_at(
+            ratatoskr_ai_archive_contracts::platform_receipt::RECEIPT_PATH,
+            "PUT",
+            None,
+            None,
+            Some("application/zip"),
+            None,
+            Body::empty(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let envelope: ratatoskr_error_contracts::ErrorEnvelope =
+        serde_json::from_value(json).expect("the 405 body is a parsable ErrorEnvelope");
+    assert_eq!(envelope.code.as_str(), "chatgpt.request.method_not_allowed");
+}
+
 /// Platform forwards a verified archive only to its private receipt route;
 /// the normal tenant receipt route must not be used as a substitute.
 #[tokio::test]

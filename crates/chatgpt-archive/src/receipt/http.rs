@@ -12,7 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse as _, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, extract::State};
 use futures_util::TryStreamExt as _;
 
@@ -117,12 +117,37 @@ impl ReceiptApiState {
     }
 }
 
-/// Builds the public receipt router: `POST /exports`, nothing else.
+/// Builds the receipt router: `POST /exports`, the loopback `POST
+/// /v1/ai-archives/receipt`, and the unauthenticated `GET /v1/capabilities`.
+///
+/// The capability route exists exactly while the receipt routes do, so the
+/// capability is advertised only when the receipt works (XR-021 CONTRACTS.md
+/// section S06 D2). Every route answers a method it does not accept with an error
+/// envelope, because Platform replaces any other non-2xx body with its own
+/// `edge.upstream_invalid_response` (S06 D1).
 pub fn router(state: Arc<ReceiptApiState>) -> Router {
     Router::new()
-        .route("/exports", post(create_export))
-        .route("/v1/ai-archives/receipt", post(receive_platform_archive))
+        .route("/exports", post(create_export).fallback(method_not_allowed))
+        .route(
+            "/v1/ai-archives/receipt",
+            post(receive_platform_archive).fallback(method_not_allowed),
+        )
+        .route(
+            "/v1/capabilities",
+            get(capabilities).fallback(method_not_allowed),
+        )
         .with_state(state)
+}
+
+/// The capability document: it needs no header and no claim because it carries no
+/// tenant data.
+async fn capabilities() -> Json<serde_json::Value> {
+    Json(ratatoskr_ai_archive_contracts::platform_receipt::receipt_capability_document("chatgpt"))
+}
+
+/// A method the route does not accept, rendered through the single envelope site.
+async fn method_not_allowed() -> Response {
+    crate::fault::reject(FailureKind::MethodNotAllowed)
 }
 
 /// The trusted, loopback-only receipt Platform calls after device authentication.
