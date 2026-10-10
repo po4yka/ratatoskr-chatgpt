@@ -1,5 +1,6 @@
 //! Typed, bounded terminal reports for Platform-owned archive operations.
 
+use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 use ratatoskr_ai_archive_contracts::{
     AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
 };
@@ -34,13 +35,14 @@ pub(crate) fn imported(
         OperationId::parse(&operation.operation_id.to_string()).map_err(invalid_contract)?;
     let provider = AiProvider::parse("chatgpt").map_err(invalid_contract)?;
     let result_kind = OperationResultKind::parse("ai_archive.import").map_err(invalid_contract)?;
+    let status = if summary.completeness == AiArchiveCompleteness::Complete {
+        OperationStatus::Succeeded
+    } else {
+        OperationStatus::PartiallySucceeded
+    };
     let report = OperationReported {
         operation_id,
-        status: if summary.completeness == AiArchiveCompleteness::Complete {
-            OperationStatus::Succeeded
-        } else {
-            OperationStatus::PartiallySucceeded
-        },
+        status,
         stage: None,
         progress_percent: None,
         results: vec![OperationResultRef {
@@ -60,7 +62,13 @@ pub(crate) fn imported(
             extensions: Extensions::new(),
         }],
         error: None,
-        warnings: Vec::new(),
+        // A partial success without a diagnostic is invalid (S06 D3): an incomplete
+        // import carries exactly the contract warning and no error.
+        warnings: if status == OperationStatus::PartiallySucceeded {
+            vec![incomplete_import_warning()]
+        } else {
+            Vec::new()
+        },
         extensions: Extensions::new(),
     };
     Ok(report)
@@ -91,4 +99,59 @@ pub(crate) fn failed(operation: PlatformOperation) -> Result<OperationReported, 
 
 fn invalid_contract(error: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
     RepositoryError::backend(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatoskr_ai_archive_contracts::AiArchiveCompleteness;
+    use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
+    use ratatoskr_operation_contracts::OperationStatus;
+    use uuid::Uuid;
+
+    use super::{ImportSummary, PlatformOperation, imported};
+
+    fn summary(completeness: AiArchiveCompleteness) -> ImportSummary {
+        ImportSummary {
+            completeness,
+            conversation_count: 1,
+            message_count: 2,
+            asset_count: 0,
+            gap_count: u32::from(completeness != AiArchiveCompleteness::Complete),
+            warning_count: 0,
+        }
+    }
+
+    fn report(
+        completeness: AiArchiveCompleteness,
+    ) -> ratatoskr_operation_contracts::OperationReported {
+        imported(
+            PlatformOperation {
+                operation_id: Uuid::now_v7(),
+            },
+            Uuid::now_v7(),
+            summary(completeness),
+        )
+        .expect("the report builds from valid identities")
+    }
+
+    #[test]
+    fn an_incomplete_import_reports_partial_success_with_the_contract_warning() {
+        let report = report(AiArchiveCompleteness::StructurallyPartial);
+
+        assert_eq!(report.status, OperationStatus::PartiallySucceeded);
+        assert_eq!(report.warnings, vec![incomplete_import_warning()]);
+        assert!(report.error.is_none());
+        report
+            .validate()
+            .expect("an incomplete import must satisfy the report invariant");
+    }
+
+    #[test]
+    fn a_complete_import_reports_success_without_warnings() {
+        let report = report(AiArchiveCompleteness::Complete);
+
+        assert_eq!(report.status, OperationStatus::Succeeded);
+        assert!(report.warnings.is_empty());
+        report.validate().expect("a complete import is valid");
+    }
 }
