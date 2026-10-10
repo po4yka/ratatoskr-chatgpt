@@ -15,6 +15,11 @@ use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
 use axum::{Json, extract::State};
 use futures_util::TryStreamExt as _;
+use ratatoskr_ai_archive_contracts::platform_receipt::{
+    CAPABILITIES_PATH, HEADER_ARCHIVE_BYTE_SIZE, HEADER_ARCHIVE_SHA256, HEADER_CORRELATION_ID,
+    HEADER_DEVICE_ID, HEADER_OPERATION_ID, HEADER_USER_ID, RECEIPT_PATH,
+    receipt_capability_document,
+};
 
 use super::auth::{TenantAuthenticator, TenantPrincipal};
 use super::{AcquisitionMode, ArchiveReceiver, PlatformOperation, ReceiptError, ReceiptOutcome};
@@ -22,12 +27,6 @@ use crate::error::{ArchiveError, FailureKind, Subsystem};
 
 /// The acquisition-mode header the client must declare.
 pub const HEADER_ACQUISITION: &str = "x-ratatoskr-acquisition";
-const HEADER_PLATFORM_USER_ID: &str = "x-ratatoskr-user-id";
-const HEADER_PLATFORM_DEVICE_ID: &str = "x-ratatoskr-device-id";
-const HEADER_CORRELATION_ID: &str = "x-correlation-id";
-const HEADER_OPERATION_ID: &str = "x-ratatoskr-operation-id";
-const HEADER_ARCHIVE_SHA256: &str = "x-ratatoskr-archive-sha256";
-const HEADER_ARCHIVE_BYTE_SIZE: &str = "x-ratatoskr-archive-byte-size";
 
 /// What the receipt answers with on success.
 #[derive(Debug, serde::Serialize)]
@@ -129,11 +128,11 @@ pub fn router(state: Arc<ReceiptApiState>) -> Router {
     Router::new()
         .route("/exports", post(create_export).fallback(method_not_allowed))
         .route(
-            "/v1/ai-archives/receipt",
+            RECEIPT_PATH,
             post(receive_platform_archive).fallback(method_not_allowed),
         )
         .route(
-            "/v1/capabilities",
+            CAPABILITIES_PATH,
             get(capabilities).fallback(method_not_allowed),
         )
         .with_state(state)
@@ -142,7 +141,7 @@ pub fn router(state: Arc<ReceiptApiState>) -> Router {
 /// The capability document: it needs no header and no claim because it carries no
 /// tenant data.
 async fn capabilities() -> Json<serde_json::Value> {
-    Json(ratatoskr_ai_archive_contracts::platform_receipt::receipt_capability_document("chatgpt"))
+    Json(receipt_capability_document("chatgpt"))
 }
 
 /// A method the route does not accept, rendered through the single envelope site.
@@ -198,10 +197,8 @@ fn platform_claims(
     headers: &axum::http::HeaderMap,
 ) -> Option<(TenantPrincipal, String, u64, PlatformOperation)> {
     let parse = |name: &'static str| headers.get(name)?.to_str().ok();
-    let user_id = parse(HEADER_PLATFORM_USER_ID)?.parse::<uuid::Uuid>().ok()?;
-    let _device_id = parse(HEADER_PLATFORM_DEVICE_ID)?
-        .parse::<uuid::Uuid>()
-        .ok()?;
+    let user_id = parse(HEADER_USER_ID)?.parse::<uuid::Uuid>().ok()?;
+    let _device_id = parse(HEADER_DEVICE_ID)?.parse::<uuid::Uuid>().ok()?;
     let correlation = parse(HEADER_CORRELATION_ID)?;
     let operation_id = parse(HEADER_OPERATION_ID)?.parse::<uuid::Uuid>().ok()?;
     let sha256 = parse(HEADER_ARCHIVE_SHA256)?;
