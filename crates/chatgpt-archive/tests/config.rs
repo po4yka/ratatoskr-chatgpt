@@ -24,7 +24,7 @@ fn minimal_valid_environment_parses() {
     let config = loaded.expect("a single required key must be enough");
     assert_eq!(
         config.admin.listen_address,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9084)
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9085)
     );
     assert_eq!(config.telemetry.log_filter, "info");
     assert_eq!(config.limits.database_connections, 8);

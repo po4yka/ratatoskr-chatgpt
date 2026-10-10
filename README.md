@@ -19,19 +19,19 @@
 
 ```bash
 docker compose up -d postgres          # PostgreSQL 17 on 127.0.0.1:5439
-export RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9084
+export RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9085
 export RATATOSKR__STORAGE__BLOB_ROOT=/tmp/ratatoskr-chatgpt/blobs
 export RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT=/tmp/ratatoskr-chatgpt/staging
 export RATATOSKR__RECEIPT__TENANT_TOKENS='dev-token=local-account'
 export RATATOSKR__STORAGE__DATABASE_URL=postgres://chatgpt:chatgpt@127.0.0.1:5439/chatgpt
 cargo run -p ratatoskr-chatgpt-archive-service
-curl http://127.0.0.1:9084/health/ready
+curl http://127.0.0.1:9085/health/ready
 ```
 
 With staging root and tokens configured, upload an export:
 
 ```bash
-curl -X POST http://127.0.0.1:9084/exports \
+curl -X POST http://127.0.0.1:9085/exports \
   -H 'Authorization: Bearer dev-token' \
   -H 'X-Ratatoskr-Acquisition: consumer_export' \
   -H 'Content-Type: application/zip' \

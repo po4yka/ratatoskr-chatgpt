@@ -19,7 +19,7 @@ Use the production receipt boundary so the original passes the same streaming ha
 inspection as any other archive:
 
 ```bash
-curl -X POST http://127.0.0.1:9084/exports \
+curl -X POST http://127.0.0.1:9085/exports \
   -H 'Authorization: Bearer <owner-provided-local-token>' \
   -H 'X-Ratatoskr-Acquisition: consumer_export' \
   -H 'Content-Type: application/zip' \
