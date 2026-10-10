@@ -1,0 +1,28 @@
+## Context
+
+XR-021 CONTRACTS.md is the single source of truth for every cross-repository contract. This change implements its ChatGPT half and records only decisions that are local to this repository.
+
+## Decisions
+
+- Capability route lives on the receipt router only (S06 D2), so the capability is advertised exactly while the receipt works. Method errors are rendered per route with `MethodRouter::fallback` because the receipt router is merged into the admin router, and axum refuses to merge two routers that both set a router-level fallback.
+- The incomplete-import warning is built only by `platform_receipt::incomplete_import_warning()` and `OperationReported::validate()` is the test oracle (S06 D3).
+- `NormalizedArchiveEvent` becomes a complete `EventEnvelope` built at enqueue time. The envelope `event_id` is a fresh UUIDv7; the outbox row id (a bigint) stays the `Nats-Msg-Id`, as S07 specifies for this repository.
+- One pump selects unpublished rows ordered by id and maps `event_type` through the closed `subject_for_event_type`. An unknown type is a hard error and the schema `CHECK` makes such a row impossible to insert.
+- The import persists only conversations, messages and content parts today. Facts are built from persisted rows, so this change also persists what the facts need: conversation titles, projects with their instructions and conversation links, assets with their verified blobs, and structured gaps on the completeness report. The projection reads rows only; it never reuses the in-memory parse.
+- Projection is deterministic. `content_digest` comes only from `AiConversation::compute_content_digest`. A conversation is `added` when no earlier outbox event exists for its id, `updated` when the digest changed, and nothing when unchanged. Deduplication key is `<event_type>:<aggregate>:<digest_hex>`.
+- Messages with provider role `internal` or `unknown` are excluded, a conversation warning `ai_archive.message_role_unrepresentable` is recorded, and children are re-parented to the nearest represented ancestor.
+- One `OwnerResolver` built from `config.receipt.platform_accounts` serves projection and deletion. An account with no mapping emits no `ai_archive.*` fact, and a deletion counts it as `downstream_tombstone_unbound`.
+- Deletion order is rows first, bytes second, complete last. Phase A deletes the scope rows, the dependents and repoints retained provenance in one transaction under the tenant lock, recomputes blob sharing against the rows that remain, inserts tombstones and records `rows_removed_at`. Phase B erases bytes and marks items purged. Phase C writes the audit and completes the request. `finalizing` is no longer written.
+- The projection is verified only against synthetic fixtures. The parsers are bound to a synthetic export schema, so no claim is made about real ChatGPT exports.
+- Each conversation and project row carries the parser release that last wrote its content (`parser_name`, `parser_version`). The contract digest covers per-message parser stamps, so stamping a reparse's release on rows it did not rewrite would make every conversation look changed. A reparse that reads unchanged content leaves the row, its stamp and so its digest alone and emits nothing; rewritten content takes the new stamp. Each fact's import provenance names the stamp of the entity it carries, so `validate` holds for every fact.
+- The completeness report gains `gaps`, the contract `AiGap` entries, because an incomplete import without a named gap is invalid (invariant A1). `gap_count` is now the number of gap entries, one per kind (unrecognized records, missing files, and each category the export did not contain), instead of the number of records behind them; the record counts live in each gap's `affected_count`. The Platform summary reports the same number.
+- Messages keep the provider presentation order in `messages.source_ordinal`; the persisted rows would otherwise have no order the contract's presentation order could be read from. Conversations keep provider times in `provider_created_at` and `provider_updated_at`, separate from the archive's own row times.
+- Plain text becomes a contract text part. Tool, media and unknown provider parts have no lossless typed form in the synthetic shape (a tool call carries arguments the contract has no field for, a tool result carries no outcome, a media reference has no verified bytes), so they travel verbatim as provider parts instead of as typed `AiToolCall`, `AiToolResult` or `AiAsset` values with invented fields. No `AiAsset` part is emitted because the import path never produces verified asset bytes.
+- Retained provenance is repointed to the earliest retained observing export for first-seen and observed-in, and to the latest one for last-seen. S07 names the earliest for all three; a last-seen pointer at the earliest observer would understate recency.
+- A surviving conversation never points at a project the deletion removes: its `project_id` is cleared.
+- The publisher records `attempt_count`, a safe `last_error` class and `next_attempt_at` on a refused row and moves on to the rows behind it (S02 rule 3). An event type outside the closed table, or a stored document that is not the envelope of its declared type, is fatal: the publisher stops, readiness goes false and the service exits non-zero (S02 rules 2 and 5).
+
+## Risks
+
+- A residual cross-tenant dedupe race on content-addressed blobs is narrowed, not closed (S07). Closing it needs a global advisory lock or blob reference counts and is out of scope.
+- Existing development databases must be recreated from the edited `schema.sql`; there are no migrations.
