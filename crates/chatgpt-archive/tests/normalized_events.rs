@@ -59,9 +59,13 @@ fn import_event_round_trips_the_published_contract_fixture()
 #[test]
 fn conversation_event_round_trips_the_published_contract_fixture()
 -> Result<(), Box<dyn std::error::Error>> {
+    // The contract verifies a conversation fact's digest, and a producer sets it only
+    // through the contract function, so the fixture's placeholder digest is recomputed.
+    let mut conversation = serde_json::from_str::<AiConversation>(CONVERSATION)?;
+    conversation.content_digest = AiConversation::compute_content_digest(&conversation.messages)?;
     let payload = AiConversationAdded {
         import_provenance: serde_json::from_str::<AiArchiveProvenance>(PROVENANCE)?,
-        conversation: serde_json::from_str::<AiConversation>(CONVERSATION)?,
+        conversation,
         extensions: Extensions::new(),
     };
     let event = NormalizedArchiveEvent::conversation_added(payload)?;
