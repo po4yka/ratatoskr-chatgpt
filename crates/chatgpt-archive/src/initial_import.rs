@@ -1,15 +1,17 @@
 //! Restart-safe initial import execution and terminal operation correlation.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::stream;
+use ratatoskr_ai_archive_contracts::{AiGap, AiGapKind};
 use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
-use ratatoskr_identifiers::{BlobRef, EntityRef, EventId, WireTimestamp};
+use ratatoskr_identifiers::{BlobRef, EntityRef, EventId, Extensions, SafeMessage, WireTimestamp};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::contract_projection::{FactScope, HeadPolicy, project_import_facts};
+use crate::owner::OwnerResolver;
 use crate::privacy_deletion::service::lock_tenant;
 use crate::reparse::{
     ReparseError, ReparsePlan, compare, current_projection, persist_artifacts, persist_projection,
@@ -27,6 +29,7 @@ pub struct InitialImportWorker {
     blobs: BlobStore,
     registry: Arc<ParserRegistry>,
     limits: ArchiveLimits,
+    owners: OwnerResolver,
 }
 
 impl InitialImportWorker {
@@ -43,7 +46,19 @@ impl InitialImportWorker {
             blobs,
             registry,
             limits,
+            owners: OwnerResolver::default(),
         }
+    }
+
+    /// Binds archive accounts to the Platform users that own their facts.
+    ///
+    /// `platform_accounts` pairs each Platform user with the external reference of
+    /// the account that user's archives arrive under. An account that appears in no
+    /// pair imports normally but emits no `ai_archive.*` fact.
+    #[must_use]
+    pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
+        self.owners = OwnerResolver::new(platform_accounts);
+        self
     }
 
     /// Processes at most one durable import or one late operation correlation.
@@ -178,7 +193,8 @@ impl InitialImportWorker {
         plan: &ReparsePlan,
         stored_artifacts: &[BlobRef],
     ) -> Result<(), ReparseError> {
-        let summary = import_summary(&plan.parsed);
+        let gaps = import_gaps(&plan.parsed)?;
+        let summary = import_summary(&plan.parsed, gaps.len());
         let completeness_status = if summary.completeness
             == ratatoskr_ai_archive_contracts::AiArchiveCompleteness::Complete
         {
@@ -208,7 +224,6 @@ impl InitialImportWorker {
         }
         persist_artifacts(&mut tx, plan, stored_artifacts).await?;
         persist_projection(&mut tx, plan).await?;
-        persist_messages(&mut tx, plan).await?;
         let counts = serde_json::json!({
             "conversations": summary.conversation_count,
             "messages": summary.message_count,
@@ -217,14 +232,16 @@ impl InitialImportWorker {
         });
         sqlx::query(
             "INSERT INTO chatgpt_archive.completeness_reports
-             (id, import_run_id, status, counts, warnings, missing_assets, unknown_variants)
-             VALUES ($1, $2, $3, $4, '[]'::jsonb, $5, $6)
+             (id, import_run_id, status, counts, warnings, gaps, missing_assets,
+              unknown_variants)
+             VALUES ($1, $2, $3, $4, '[]'::jsonb, $5, $6, $7)
              ON CONFLICT (import_run_id) DO NOTHING",
         )
         .bind(Uuid::now_v7())
         .bind(run_id)
         .bind(completeness_status)
         .bind(counts)
+        .bind(serde_json::to_value(&gaps)?)
         .bind(
             i32::try_from(
                 plan.parsed
@@ -249,6 +266,20 @@ impl InitialImportWorker {
         .bind(&plan.parsed.parser.version)
         .bind(&plan.parsed.schema_id)
         .execute(&mut *tx)
+        .await?;
+        // Facts first, in the transaction that persisted the rows they are read from:
+        // by the time Platform sees the operation finish, they are already queued.
+        project_import_facts(
+            &mut tx,
+            &self.owners,
+            &FactScope {
+                archive_id,
+                export_id: plan.export_id,
+                account_id: plan.tenant_id,
+                parser: &plan.parsed.parser,
+                head: HeadPolicy::Always,
+            },
+        )
         .await?;
         enqueue_operation_reports_in(
             &mut tx,
@@ -331,7 +362,64 @@ async fn mark_permanent_failure(
     Ok(())
 }
 
-fn import_summary(parsed: &ParsedConversations) -> crate::receipt::report::ImportSummary {
+/// The named holes of an import, one entry per kind, so that an incomplete import
+/// always says what is missing (contract invariant A1).
+fn import_gaps(parsed: &ParsedConversations) -> Result<Vec<AiGap>, ReparseError> {
+    let unavailable_assets = parsed
+        .assets
+        .iter()
+        .filter(|asset| asset.blob.is_none())
+        .count();
+    let mut gaps = Vec::new();
+    for (present, kind, detail, affected) in [
+        (
+            !parsed.raw_records.is_empty(),
+            "unrecognized_record",
+            "Records this parser does not model are preserved only in the raw archive.",
+            Some(parsed.raw_records.len()),
+        ),
+        (
+            unavailable_assets > 0,
+            "missing_file",
+            "Referenced files were not available as verified bytes.",
+            Some(unavailable_assets),
+        ),
+        (
+            parsed.projects.is_empty(),
+            "projects_not_observed",
+            "The export contained no projects.",
+            None,
+        ),
+        (
+            parsed.canvas_documents.is_empty(),
+            "canvas_not_observed",
+            "The export contained no canvas documents.",
+            None,
+        ),
+        (
+            parsed.assets.is_empty(),
+            "assets_not_observed",
+            "The export contained no file or generated-asset references.",
+            None,
+        ),
+    ] {
+        if present {
+            gaps.push(AiGap {
+                gap_kind: AiGapKind::parse(kind).map_err(|_| ReparseError::Conflict)?,
+                detail: SafeMessage::parse(detail).map_err(|_| ReparseError::Conflict)?,
+                external_ref: None,
+                affected_count: affected.and_then(|count| u32::try_from(count).ok()),
+                extensions: Extensions::new(),
+            });
+        }
+    }
+    Ok(gaps)
+}
+
+fn import_summary(
+    parsed: &ParsedConversations,
+    gap_entries: usize,
+) -> crate::receipt::report::ImportSummary {
     let conversations = parsed.conversations.len();
     let messages = parsed
         .conversations
@@ -343,16 +431,7 @@ fn import_summary(parsed: &ParsedConversations) -> crate::receipt::report::Impor
         .iter()
         .filter(|asset| asset.blob.is_some())
         .count();
-    let unavailable_assets = parsed
-        .assets
-        .iter()
-        .filter(|asset| asset.blob.is_none())
-        .count();
-    let unobserved_categories = usize::from(parsed.projects.is_empty())
-        + usize::from(parsed.canvas_documents.is_empty())
-        + usize::from(parsed.assets.is_empty());
-    let gaps = parsed.raw_records.len() + unavailable_assets + unobserved_categories;
-    let completeness = if gaps == 0 {
+    let completeness = if gap_entries == 0 {
         ratatoskr_ai_archive_contracts::AiArchiveCompleteness::Complete
     } else {
         ratatoskr_ai_archive_contracts::AiArchiveCompleteness::StructurallyPartial
@@ -362,7 +441,7 @@ fn import_summary(parsed: &ParsedConversations) -> crate::receipt::report::Impor
         conversation_count: u32::try_from(conversations).unwrap_or(u32::MAX),
         message_count: u32::try_from(messages).unwrap_or(u32::MAX),
         asset_count: u32::try_from(stored_assets).unwrap_or(u32::MAX),
-        gap_count: u32::try_from(gaps).unwrap_or(u32::MAX),
+        gap_count: u32::try_from(gap_entries).unwrap_or(u32::MAX),
         warning_count: 0,
     }
 }
@@ -483,104 +562,4 @@ fn operation_report_envelope(
         .set_payload(report)
         .map_err(|_| ReparseError::Conflict)?;
     Ok(envelope)
-}
-
-async fn persist_messages(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    plan: &ReparsePlan,
-) -> Result<(), ReparseError> {
-    for conversation in &plan.parsed.conversations {
-        let conversation_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM chatgpt_archive.conversations
-             WHERE account_id = $1 AND external_id = $2 ORDER BY id LIMIT 1",
-        )
-        .bind(plan.tenant_id)
-        .bind(&conversation.external_id)
-        .fetch_one(&mut **tx)
-        .await?;
-        let mut message_ids = BTreeMap::new();
-        for message in &conversation.messages {
-            let message_id: Uuid = sqlx::query_scalar(
-                "INSERT INTO chatgpt_archive.messages
-                 (id, conversation_id, external_id, role, model_slug, provider_metadata)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (conversation_id, external_id) DO UPDATE
-                 SET role = EXCLUDED.role, model_slug = EXCLUDED.model_slug,
-                     provider_metadata = EXCLUDED.provider_metadata
-                 RETURNING id",
-            )
-            .bind(Uuid::now_v7())
-            .bind(conversation_id)
-            .bind(&message.external_id)
-            .bind(message_role(&message.role))
-            .bind(&message.model_slug)
-            .bind(&message.provider_metadata)
-            .fetch_one(&mut **tx)
-            .await?;
-            message_ids.insert(message.external_id.clone(), message_id);
-            sqlx::query(
-                "INSERT INTO chatgpt_archive.export_entity_observations
-                 (export_id, entity_kind, entity_id) VALUES ($1, 'message', $2)
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(plan.export_id)
-            .bind(message_id)
-            .execute(&mut **tx)
-            .await?;
-            for part in &message.parts {
-                sqlx::query(
-                    "INSERT INTO chatgpt_archive.content_parts
-                     (id, message_id, revision, ordinal, part_kind, payload)
-                     VALUES ($1, $2, 0, $3, $4, $5) ON CONFLICT DO NOTHING",
-                )
-                .bind(Uuid::now_v7())
-                .bind(message_id)
-                .bind(i32::try_from(part.ordinal).unwrap_or(i32::MAX))
-                .bind(content_kind(&part.kind))
-                .bind(&part.payload)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        for message in &conversation.messages {
-            if let (Some(message_id), Some(parent_id)) = (
-                message_ids.get(&message.external_id),
-                message
-                    .parent_external_id
-                    .as_ref()
-                    .and_then(|parent| message_ids.get(parent)),
-            ) {
-                sqlx::query(
-                    "UPDATE chatgpt_archive.messages SET parent_message_id = $2 WHERE id = $1",
-                )
-                .bind(message_id)
-                .bind(parent_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-const fn message_role(role: &crate::MessageRole) -> &'static str {
-    match role {
-        crate::MessageRole::System => "system",
-        crate::MessageRole::User => "user",
-        crate::MessageRole::Assistant => "assistant",
-        crate::MessageRole::Tool => "tool",
-        crate::MessageRole::Internal => "internal",
-        crate::MessageRole::Unknown => "unknown",
-    }
-}
-
-const fn content_kind(kind: &crate::ContentPartKind) -> &'static str {
-    match kind {
-        crate::ContentPartKind::Text => "text",
-        crate::ContentPartKind::ToolCall => "tool_call",
-        crate::ContentPartKind::ToolResult => "tool_result",
-        crate::ContentPartKind::Image => "image",
-        crate::ContentPartKind::File => "file",
-        crate::ContentPartKind::Unknown => "unknown",
-    }
 }

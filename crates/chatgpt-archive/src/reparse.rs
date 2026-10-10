@@ -12,6 +12,11 @@ use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::contract_projection::{FactScope, HeadPolicy, ProjectionError, project_import_facts};
+use crate::normalized_persist::{
+    persist_conversation_detail, persist_projects, project_of_conversation,
+};
+use crate::owner::OwnerResolver;
 use crate::privacy_deletion::service::lock_tenant;
 use crate::reconciliation::digest::conversation_digest;
 use crate::{
@@ -125,6 +130,9 @@ pub enum ReparseError {
     /// A terminal Platform operation result could not be constructed.
     #[error("import result construction failed")]
     Report(#[from] crate::receipt::RepositoryError),
+    /// The archive facts of the persisted rows could not be projected.
+    #[error("archive fact projection failed")]
+    Projection(#[from] ProjectionError),
 }
 
 /// Plans and applies exact parser replay over one retained raw archive.
@@ -134,6 +142,7 @@ pub struct ReparseEngine {
     blobs: BlobStore,
     registry: Arc<ParserRegistry>,
     limits: ArchiveLimits,
+    owners: OwnerResolver,
 }
 
 impl ReparseEngine {
@@ -150,7 +159,18 @@ impl ReparseEngine {
             blobs,
             registry,
             limits,
+            owners: OwnerResolver::default(),
         }
+    }
+
+    /// Binds archive accounts to the Platform users that own their facts.
+    ///
+    /// An account that appears in no `(Platform user, account external reference)`
+    /// pair is reparsed normally but emits no `ai_archive.*` fact.
+    #[must_use]
+    pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
+        self.owners = OwnerResolver::new(platform_accounts);
+        self
     }
 
     /// Builds a side-effect-free immutable comparison plan.
@@ -322,6 +342,19 @@ impl ReparseEngine {
         .await?;
         persist_artifacts(&mut transaction, plan, &stored_artifacts).await?;
         persist_projection(&mut transaction, plan).await?;
+        // A reparse announces only what changed: identical content adds no row.
+        project_import_facts(
+            &mut transaction,
+            &self.owners,
+            &FactScope {
+                archive_id: plan.report.archive_id,
+                export_id: plan.export_id,
+                account_id: plan.tenant_id,
+                parser: &plan.report.target_parser,
+                head: HeadPolicy::WithChangedEntities,
+            },
+        )
+        .await?;
         transaction.commit().await?;
         Ok(plan.report.clone())
     }
@@ -583,10 +616,20 @@ pub(crate) async fn persist_artifacts(
     Ok(())
 }
 
+/// Persists the projects, conversation rows, revisions and the normalized detail of
+/// every conversation that is new or changed in this plan.
 pub(crate) async fn persist_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &ReparsePlan,
 ) -> Result<(), ReparseError> {
+    let projects = persist_projects(
+        transaction,
+        plan.tenant_id,
+        plan.export_id,
+        &plan.parsed,
+        &plan.report.target_parser,
+    )
+    .await?;
     for parsed in &plan.parsed.conversations {
         let digest = conversation_digest(parsed);
         let id = plan
@@ -641,6 +684,15 @@ pub(crate) async fn persist_projection(
             "parser_version": plan.report.target_parser.version,
         }))
         .execute(&mut **transaction)
+        .await?;
+        persist_conversation_detail(
+            transaction,
+            plan.export_id,
+            id,
+            project_of_conversation(&plan.parsed, &projects, &parsed.external_id),
+            parsed,
+            &plan.report.target_parser,
+        )
         .await?;
     }
     Ok(())

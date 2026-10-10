@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.projects (
     archived_observed  BOOLEAN NOT NULL DEFAULT FALSE,
     first_seen_export  UUID REFERENCES chatgpt_archive.exports (id),
     last_seen_export   UUID REFERENCES chatgpt_archive.exports (id),
+    -- The parser release that last wrote this project's content. A newer release that
+    -- reads identical content leaves the stamp, and so the content digest, unchanged.
+    parser_name        TEXT,
+    parser_version     TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (account_id, external_id)
@@ -101,6 +105,13 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.conversations (
     conversation_kind  TEXT NOT NULL DEFAULT 'standard' CHECK (conversation_kind IN ('standard', 'temporary', 'branch', 'unknown')),
     first_seen_export  UUID REFERENCES chatgpt_archive.exports (id),
     last_seen_export   UUID REFERENCES chatgpt_archive.exports (id),
+    -- Instants the provider stated. Never inferred from import time; the row's own
+    -- created_at and updated_at below are the archive's clock.
+    provider_created_at TIMESTAMPTZ,
+    provider_updated_at TIMESTAMPTZ,
+    -- The parser release that last wrote this conversation's messages.
+    parser_name        TEXT,
+    parser_version     TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -113,6 +124,8 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.messages (
     role               TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool', 'internal', 'unknown')),
     model_slug         TEXT,
     generation_index   INTEGER,
+    -- Position in the provider's presentation order within the conversation.
+    source_ordinal     INTEGER,
     interrupted        BOOLEAN NOT NULL DEFAULT FALSE,
     created_at         TIMESTAMPTZ,
     updated_at         TIMESTAMPTZ,
@@ -214,6 +227,8 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.completeness_reports (
     status            TEXT NOT NULL CHECK (status IN ('complete', 'conversations_complete', 'structurally_partial', 'assets_partial', 'unknown', 'failed_validation')),
     counts            JSONB NOT NULL DEFAULT '{}'::jsonb,
     warnings          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- The named holes of the import, as contract `AiGap` entries.
+    gaps              JSONB NOT NULL DEFAULT '[]'::jsonb,
     missing_assets    INTEGER NOT NULL DEFAULT 0,
     unknown_variants  INTEGER NOT NULL DEFAULT 0,
     produced_at       TIMESTAMPTZ NOT NULL DEFAULT now()

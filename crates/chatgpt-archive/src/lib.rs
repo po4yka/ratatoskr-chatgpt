@@ -54,16 +54,22 @@ pub mod persistence;
 
 pub use persistence::{Database, PersistenceError};
 
+mod contract_projection;
 mod initial_import;
+mod normalized_persist;
 pub mod outbox;
+mod owner;
 pub mod parser_migration;
 pub mod parser_registry;
+mod pg_instant;
 pub mod portable_export;
 pub mod privacy_deletion;
 pub mod receipt;
 pub mod reconciliation;
 pub mod reparse;
+pub use contract_projection::ProjectionError;
 pub use initial_import::InitialImportWorker;
+pub use owner::OwnerResolver;
 pub mod synthetic_parser;
 pub use parser_registry::{
     CompiledParser, ParserArtifactEvidence, ParserExecutionError, ParserExecutionInput,

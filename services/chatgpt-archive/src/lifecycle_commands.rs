@@ -81,7 +81,8 @@ async fn run_reparse(
         BlobStore::new(&root)?,
         Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
-    );
+    )
+    .with_platform_users(config.receipt.platform_accounts.clone());
     let plan = engine
         .plan(
             command.tenant_id,
@@ -115,7 +116,8 @@ async fn run_parser_migrate(
         BlobStore::new(&root)?,
         Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
-    );
+    )
+    .with_platform_users(config.receipt.platform_accounts.clone());
     let engine = ParserMigrationEngine::new(reparse);
     let plan = engine
         .plan(Uuid::now_v7(), command.tenant_id, command.parser.clone())

@@ -609,7 +609,7 @@ fn register_flag_check(
 fn start_initial_import_worker(
     database: &Database,
     blob: &BlobStore,
-    limits: &ratatoskr_chatgpt_archive::Limits,
+    config: &Config,
     state: &RuntimeState,
     stopped: tokio::sync::watch::Receiver<bool>,
 ) -> Result<tokio::task::JoinHandle<()>, ServiceError> {
@@ -625,8 +625,9 @@ fn start_initial_import_worker(
         database.pool().clone(),
         blob.clone(),
         registry,
-        limits.into(),
-    );
+        (&config.limits).into(),
+    )
+    .with_platform_users(config.receipt.platform_accounts.clone());
     Ok(tokio::spawn(initial_import_loop(worker, ready, stopped)))
 }
 
@@ -729,7 +730,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
             import_task = Some(start_initial_import_worker(
                 &database,
                 &blob,
-                &config.limits,
+                config,
                 &state,
                 shutdown_rx.clone(),
             )?);
