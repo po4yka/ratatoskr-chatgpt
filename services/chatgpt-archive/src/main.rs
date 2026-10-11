@@ -5,7 +5,8 @@
 //!
 //! Sequence, in this order and no other: load configuration, install
 //! telemetry, connect the database when one is configured and apply the
-//! schema, prepare the blob root, bind the operator listener, serve until
+//! schema, prepare the blob root, bind the operator listener and, when the
+//! receipt route is mounted, the receipt listener, serve until
 //! SIGTERM or SIGINT and drain within the configured bound.
 
 use std::process::ExitCode;

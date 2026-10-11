@@ -55,6 +55,9 @@ impl core::fmt::Debug for TenantToken {
 /// Archive receipt configuration.
 #[derive(Clone, Serialize)]
 pub struct ReceiptConfig {
+    /// Socket address of the loopback receipt listener. XR-021 CONTRACTS.md R2-01 allocates port
+    /// 8096 to it, separate from the operator plane.
+    pub listen_address: SocketAddr,
     /// Bearer tokens that may authenticate a receipt, one per tenant.
     #[serde(skip_serializing)]
     pub tenant_tokens: Vec<TenantToken>,
@@ -72,6 +75,7 @@ impl core::fmt::Debug for ReceiptConfig {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("ReceiptConfig")
+            .field("listen_address", &self.listen_address)
             .field("tenant_tokens", &self.tenant_tokens)
             .field("platform_accounts", &self.platform_accounts)
             .field("event_bus_url", &"[REDACTED]")
@@ -260,6 +264,17 @@ impl Config {
             });
         }
 
+        if config.receipt.listen_address == config.admin.listen_address
+            && !violations
+                .iter()
+                .any(|violation| violation.key.ends_with("__LISTEN_ADDRESS"))
+        {
+            violations.push(Violation {
+                key: KEY_RECEIPT_LISTEN_ADDRESS.to_owned(),
+                rule: "must differ from RATATOSKR__ADMIN__LISTEN_ADDRESS: the operator plane is never served on the receipt port",
+            });
+        }
+
         if violations.is_empty() {
             Ok(config)
         } else {
@@ -269,6 +284,7 @@ impl Config {
 }
 
 const KEY_LISTEN_ADDRESS: &str = "RATATOSKR__ADMIN__LISTEN_ADDRESS";
+const KEY_RECEIPT_LISTEN_ADDRESS: &str = "RATATOSKR__RECEIPT__LISTEN_ADDRESS";
 const KEY_BLOB_ROOT: &str = "RATATOSKR__STORAGE__BLOB_ROOT";
 const KEY_DATABASE_URL: &str = "RATATOSKR__STORAGE__DATABASE_URL";
 const KEY_LOG_FILTER: &str = "RATATOSKR__TELEMETRY__LOG_FILTER";
@@ -300,6 +316,13 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
         KEY_LISTEN_ADDRESS => match value.parse::<SocketAddr>() {
             Ok(address) if address.ip().is_loopback() && address.port() != 0 => {
                 config.admin.listen_address = address;
+            }
+            Ok(_) => violations.push(refused("must be a loopback address with a port")),
+            Err(_) => violations.push(refused("must be a socket address")),
+        },
+        KEY_RECEIPT_LISTEN_ADDRESS => match value.parse::<SocketAddr>() {
+            Ok(address) if address.ip().is_loopback() && address.port() != 0 => {
+                config.receipt.listen_address = address;
             }
             Ok(_) => violations.push(refused("must be a loopback address with a port")),
             Err(_) => violations.push(refused("must be a socket address")),
@@ -479,6 +502,7 @@ impl Default for Config {
                 log_filter: "info".to_owned(),
             },
             receipt: ReceiptConfig {
+                listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8096),
                 tenant_tokens: Vec::new(),
                 platform_accounts: Vec::new(),
                 event_bus_url: None,

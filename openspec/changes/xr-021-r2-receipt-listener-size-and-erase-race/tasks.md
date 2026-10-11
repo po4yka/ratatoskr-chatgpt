@@ -4,8 +4,8 @@
 
 ## 2. Dedicated receipt listener (R2-01)
 
-- [ ] 2.1 RED: `crates/chatgpt-archive/tests/config.rs` `receipt_listener_defaults_and_validation` fails because the key is not recognized; `services/chatgpt-archive/tests/boot.rs` `receipt_and_operator_planes_are_separate_listeners` fails because the receipt and capability routes answer on the operator port and nothing listens on the receipt port.
-- [ ] 2.2 GREEN: `ReceiptConfig.listen_address` with validation, a separate receipt listener in `run`, both listeners in graceful shutdown, and the documentation that said the receipt is on the admin router.
+- [x] 2.1 RED: `crates/chatgpt-archive/tests/config.rs` `receipt_listener_defaults_and_validation` fails because the key is not recognized; `services/chatgpt-archive/tests/boot.rs` `receipt_and_operator_planes_are_separate_listeners` fails because nothing listens on the receipt port (the configuration parsing was added first so the boot test could get past a refused key). `no_receipt_listener_is_bound_without_a_database_and_a_staging_root` pins a negative that already held, so it passed in the RED run.
+- [x] 2.2 GREEN: `ReceiptConfig.listen_address` with validation, a separate receipt listener in `run`, both listeners in graceful shutdown, and the documentation that said the receipt is on the admin router.
 
 ## 3. Exact media type on the Platform receipt (R2-15)
 

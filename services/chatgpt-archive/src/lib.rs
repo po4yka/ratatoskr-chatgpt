@@ -5,11 +5,13 @@
 //!
 //! Sequence, in this order and no other: load configuration, install
 //! telemetry, connect the database when one is configured and apply the
-//! schema, prepare the blob root, bind the operator listener, serve until
+//! schema, prepare the blob root, bind the operator listener and, when the
+//! receipt route is mounted, the separate receipt listener, serve until
 //! SIGTERM or SIGINT, drain within the configured bound, shut telemetry down,
 //! exit 0.
 
 mod lifecycle_commands;
+mod listeners;
 
 pub use lifecycle_commands::main_result;
 
@@ -678,7 +680,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
 
     let state = Arc::new(RuntimeState::new());
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let (fatal_tx, mut fatal_rx) = tokio::sync::watch::channel(false);
+    let (fatal_tx, fatal_rx) = tokio::sync::watch::channel(false);
     let publisher_stopped = fatal_tx.subscribe();
     let mut outbox_task = None;
     let mut import_task = None;
@@ -692,9 +694,9 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     let blob = BlobStore::new(&root)?;
 
     // Durable receipt needs a database and a staging location; without
-    // either, the public surface simply does not mount and the admin plane
-    // serves alone.
-    let mut public_routes = None;
+    // either, the receipt surface does not mount, no receipt listener is
+    // bound, and the operator plane serves alone.
+    let mut receipt_routes = None;
     if config.storage.database_url.is_some() {
         let database = Arc::new(Database::connect(&config.storage, &config.limits).await?);
         database.apply_schema().await?;
@@ -719,7 +721,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
                 tracing::info!(runs = swept, "swept interrupted import runs");
             }
             let authenticator = Arc::new(ConfigTenantAuthenticator::from_config(&config.receipt));
-            public_routes = Some(receipt_router(Arc::new(
+            receipt_routes = Some(receipt_router(Arc::new(
                 ReceiptApiState::new_with_platform_account_ids(
                     receiver,
                     authenticator,
@@ -745,32 +747,17 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
         );
     }
 
-    let listener = tokio::net::TcpListener::bind(config.admin.listen_address)
-        .await
-        .map_err(ServiceError::Bind)?;
-
-    let receipt_served = public_routes.is_some();
-    let mut app = admin_router(Arc::clone(&state), move || metrics_handle.render());
-    if let Some(public) = public_routes {
-        app = app.merge(public);
-    }
-
-    tracing::info!(
-        address = %config.admin.listen_address,
-        receipt_served,
-        "listening"
-    );
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                () = shutdown_signal() => {},
-                _ = fatal_rx.changed() => {},
-            }
-            let _ = shutdown_tx.send(true);
-        })
-        .await
-        .map_err(ServiceError::Serve)?;
+    let operator_app = admin_router(Arc::clone(&state), move || metrics_handle.render());
+    listeners::serve_planes(
+        (config.admin.listen_address, operator_app),
+        receipt_routes.map(|routes| (config.receipt.listen_address, routes)),
+        listeners::Stop {
+            trigger: shutdown_tx,
+            observed: shutdown_rx,
+            fatal: fatal_rx,
+        },
+    )
+    .await?;
 
     await_background_tasks(
         Duration::from_millis(config.limits.shutdown_timeout_ms),

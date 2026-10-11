@@ -1,4 +1,5 @@
-//! The public receipt surface: `POST /exports` beside the admin plane.
+//! The receipt surface: `POST /exports` and the Platform receipt, served on the receipt listener
+//! and never on the operator listener (XR-021 CONTRACTS.md R2-01).
 //!
 //! The handler authenticates first, refuses malformed declarations, streams
 //! the body into the [`ArchiveReceiver`], and renders every failure through
@@ -41,7 +42,7 @@ pub struct ReceiptAnswer {
     pub byte_length: u64,
 }
 
-/// The shared state of the public receipt routes.
+/// The shared state of the receipt routes.
 #[derive(core::fmt::Debug)]
 pub struct ReceiptApiState {
     receiver: ArchiveReceiver,

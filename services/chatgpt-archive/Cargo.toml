@@ -31,7 +31,9 @@ uuid.workspace = true
 http-body-util.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+ratatoskr-ai-archive-contracts.workspace = true
 ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive", features = ["test-support"] }
+ratatoskr-error-contracts.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 

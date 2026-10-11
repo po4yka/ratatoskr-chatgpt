@@ -402,3 +402,69 @@ fn secret_is_redacted_in_debug() {
         "the password leaked into serialization: {serialized}"
     );
 }
+
+/// XR-021 CONTRACTS.md R2-01: the receipt has its own loopback listener, on 8096 by default, and the
+/// operator plane is never served on it.
+#[test]
+fn receipt_listener_defaults_and_validation() {
+    let blob = ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs");
+    let config = Config::from_environment(entries(&[blob])).expect("defaults must load");
+    assert_eq!(
+        config.receipt.listen_address,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8096),
+        "the receipt default is the port Edge probes"
+    );
+    assert_eq!(
+        config.admin.listen_address,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9085),
+        "the operator default is unchanged"
+    );
+
+    let config = Config::from_environment(entries(&[
+        blob,
+        ("RATATOSKR__RECEIPT__LISTEN_ADDRESS", "127.0.0.1:18096"),
+    ]))
+    .expect("a loopback receipt address must load");
+    assert_eq!(
+        config.receipt.listen_address,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18096)
+    );
+
+    for refused in [
+        "0.0.0.0:8096",
+        "192.0.2.10:8096",
+        "127.0.0.1:0",
+        "not-an-address",
+    ] {
+        let error = Config::from_environment(entries(&[
+            blob,
+            ("RATATOSKR__RECEIPT__LISTEN_ADDRESS", refused),
+        ]))
+        .expect_err("a non-loopback, portless or malformed address must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__LISTEN_ADDRESS"),
+            "the violation names the key: {error}"
+        );
+        assert!(
+            !error.to_string().contains(refused),
+            "the supplied value is never rendered"
+        );
+    }
+
+    let error = Config::from_environment(entries(&[
+        blob,
+        ("RATATOSKR__ADMIN__LISTEN_ADDRESS", "127.0.0.1:18096"),
+        ("RATATOSKR__RECEIPT__LISTEN_ADDRESS", "127.0.0.1:18096"),
+    ]))
+    .expect_err("the receipt address must differ from the operator address");
+    assert!(
+        error.violations.iter().any(|violation| {
+            violation.key == "RATATOSKR__RECEIPT__LISTEN_ADDRESS"
+                && violation.rule.contains("RATATOSKR__ADMIN__LISTEN_ADDRESS")
+        }),
+        "the violation names both keys: {error}"
+    );
+}

@@ -20,6 +20,7 @@
 ```bash
 docker compose up -d postgres          # PostgreSQL 17 on 127.0.0.1:5439
 export RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9085
+export RATATOSKR__RECEIPT__LISTEN_ADDRESS=127.0.0.1:8096
 export RATATOSKR__STORAGE__BLOB_ROOT=/tmp/ratatoskr-chatgpt/blobs
 export RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT=/tmp/ratatoskr-chatgpt/staging
 export RATATOSKR__RECEIPT__TENANT_TOKENS='dev-token=local-account'
@@ -28,10 +29,12 @@ cargo run -p ratatoskr-chatgpt-archive-service
 curl http://127.0.0.1:9085/health/ready
 ```
 
-With staging root and tokens configured, upload an export:
+The service binds two loopback listeners. The operator listener (`RATATOSKR__ADMIN__LISTEN_ADDRESS`, default `127.0.0.1:9085`) serves `/health/live`, `/health/ready`, `/metrics` and `/version` only. The receipt listener (`RATATOSKR__RECEIPT__LISTEN_ADDRESS`, default `127.0.0.1:8096`, the port Edge probes and forwards to) serves `POST /v1/ai-archives/receipt`, `GET /v1/capabilities` and the tenant-token `POST /exports`, and exists only while a database and a staging root are configured. The two addresses must differ and both must be loopback.
+
+With staging root and tokens configured, upload an export to the receipt listener:
 
 ```bash
-curl -X POST http://127.0.0.1:9085/exports \
+curl -X POST http://127.0.0.1:8096/exports \
   -H 'Authorization: Bearer dev-token' \
   -H 'X-Ratatoskr-Acquisition: consumer_export' \
   -H 'Content-Type: application/zip' \
