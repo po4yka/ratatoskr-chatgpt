@@ -59,44 +59,57 @@ pub(super) async fn conversation_rows(
     transaction: &mut Tx<'_>,
     export_id: Uuid,
 ) -> Result<Vec<ConversationRow>, sqlx::Error> {
-    let query = format!(
-        "SELECT c.id, c.external_id, c.title, c.project_id, {created}, {updated},
-                c.parser_name, c.parser_version
-         FROM chatgpt_archive.conversations c
+    let rows: Vec<HeaderRow> = sqlx::query_as(&format!(
+        "{select}
          JOIN chatgpt_archive.export_entity_observations o
            ON o.entity_kind = 'conversation' AND o.entity_id = c.id
          WHERE o.export_id = $1 ORDER BY c.external_id, c.id",
+        select = header_select(),
+    ))
+    .bind(export_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows.into_iter().map(header).collect())
+}
+
+/// The named conversations, in provider id order.
+pub(super) async fn conversation_rows_of(
+    transaction: &mut Tx<'_>,
+    ids: &[Uuid],
+) -> Result<Vec<ConversationRow>, sqlx::Error> {
+    let rows: Vec<HeaderRow> = sqlx::query_as(&format!(
+        "{select} WHERE c.id = ANY($1) ORDER BY c.external_id, c.id",
+        select = header_select(),
+    ))
+    .bind(ids)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows.into_iter().map(header).collect())
+}
+
+fn header_select() -> String {
+    format!(
+        "SELECT c.id, c.external_id, c.title, c.project_id, {created}, {updated},
+                c.parser_name, c.parser_version
+         FROM chatgpt_archive.conversations c",
         created = pg_instant_sql("c.provider_created_at"),
         updated = pg_instant_sql("c.provider_updated_at"),
-    );
-    let rows: Vec<HeaderRow> = sqlx::query_as(&query)
-        .bind(export_id)
-        .fetch_all(&mut **transaction)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                external_id,
-                title,
-                project_id,
-                created_at,
-                updated_at,
-                parser_name,
-                parser_version,
-            )| ConversationRow {
-                id,
-                external_id,
-                title,
-                project_id,
-                created_at,
-                updated_at,
-                parser_name,
-                parser_version,
-            },
-        )
-        .collect())
+    )
+}
+
+fn header(
+    (id, external_id, title, project_id, created_at, updated_at, parser_name, parser_version): HeaderRow,
+) -> ConversationRow {
+    ConversationRow {
+        id,
+        external_id,
+        title,
+        project_id,
+        created_at,
+        updated_at,
+        parser_name,
+        parser_version,
+    }
 }
 
 /// One message as the query returns it.

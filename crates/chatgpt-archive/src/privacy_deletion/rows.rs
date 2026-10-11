@@ -18,6 +18,9 @@ use super::execution::DurableRequest;
 use super::service::{
     FinalizationFault, PrivacyDeletionError, PrivacyDeletionService, lock_tenant,
 };
+use crate::contract_projection::{
+    Deletion, Survivors, find_survivors as find_survivors_in, reannounce,
+};
 use crate::pg_instant::database_now;
 use crate::{NormalizedArchiveEvent, OutboxPlacement};
 
@@ -64,6 +67,9 @@ pub(super) async fn remove_rows(
         transaction.rollback().await?;
         return Err(PrivacyDeletionError::InjectedFinalization);
     }
+    // Before the rows go: a survivor's latest fact is an outbox row that the removal takes with
+    // the deleted export (XR-021 CONTRACTS.md R3-06).
+    let survivors = find_survivors(&mut transaction, request_id).await?;
     delete_scoped_rows(&mut transaction, request_id, durable.tenant_id).await?;
     let removed_at = database_now(&mut transaction).await?;
     insert_tombstones(
@@ -75,6 +81,23 @@ pub(super) async fn remove_rows(
         removed_at,
     )
     .await?;
+    if let Some(owner) = owner.filter(|_| !survivors.is_empty()) {
+        reannounce(
+            &mut transaction,
+            &Deletion {
+                request_id,
+                account_id: durable.tenant_id,
+                owner,
+                tombstoned_at: removed_at,
+            },
+            &survivors,
+        )
+        .await?;
+    }
+    if fault == FinalizationFault::AfterTombstones {
+        transaction.rollback().await?;
+        return Err(PrivacyDeletionError::InjectedFinalization);
+    }
     recompute_blob_sharing(&mut transaction, request_id).await?;
     sqlx::query(
         "UPDATE chatgpt_archive.privacy_deletion_requests
@@ -497,4 +520,19 @@ async fn delete_i64_category(
         .execute(&mut **transaction)
         .await?;
     Ok(())
+}
+
+/// The survivors of this deletion: retained records whose latest fact names an archive it deletes.
+async fn find_survivors(
+    transaction: &mut Tx<'_>,
+    request_id: Uuid,
+) -> Result<Survivors, PrivacyDeletionError> {
+    let exports = item_ids(transaction, request_id, "export", "remove").await?;
+    let archives: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT ai_archive_id FROM chatgpt_archive.exports WHERE id = ANY($1)",
+    )
+    .bind(&exports)
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(find_survivors_in(transaction, request_id, &archives).await?)
 }

@@ -11,6 +11,9 @@
 //! verified only against synthetic fixtures and makes no claim about real exports.
 
 mod messages;
+mod reannounce;
+
+pub(crate) use reannounce::{Deletion, Survivors, find_survivors, reannounce};
 
 use ratatoskr_ai_archive_contracts::{
     AiArchiveCompleteness, AiArchiveImport, AiArchiveProvenance, AiCompletenessReport,
@@ -250,49 +253,77 @@ async fn completeness_report(
     })
 }
 
+/// One persisted project as the projection query returns it.
+type ProjectRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+const PROJECT_SELECT: &str = "SELECT p.id, p.external_id, p.title, p.description, p.instructions,
+                                     p.parser_name, p.parser_version
+                              FROM chatgpt_archive.projects p";
+
+/// A project fact's record, the provenance it is announced with, and its content digest.
+struct ProjectFact {
+    project: AiProject,
+    provenance: AiArchiveProvenance,
+    digest: ContentDigest,
+}
+
+fn project_fact(
+    row: ProjectRow,
+    base: &AiArchiveProvenance,
+) -> Result<ProjectFact, ProjectionError> {
+    let (id, external_id, title, description, instructions, parser_name, parser_version) = row;
+    let provenance = entity_provenance(base, parser_name.as_deref(), parser_version.as_deref())?;
+    let project = AiProject {
+        ai_project_id: AiProjectId(id),
+        provider: provenance.provider.clone(),
+        external_project_id: EntityLocalId::parse(&external_id).ok(),
+        title: project_title(title.as_deref(), &external_id)?,
+        description: description.and_then(|text| AiText::parse(&text).ok()),
+        instructions: instructions.and_then(|text| AiText::parse(&text).ok()),
+        provider_created_at: None,
+        provider_updated_at: None,
+        parser_name: provenance.parser_name.clone(),
+        parser_version: provenance.parser_version.clone(),
+        extensions: Extensions::new(),
+    };
+    let digest = digest_of(&serde_json::to_value(&project)?)?;
+    Ok(ProjectFact {
+        project,
+        provenance,
+        digest,
+    })
+}
+
 async fn project_candidates(
     transaction: &mut Tx<'_>,
     scope: &FactScope<'_>,
     base: &AiArchiveProvenance,
 ) -> Result<Vec<Candidate>, ProjectionError> {
-    type Row = (
-        Uuid,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT p.id, p.external_id, p.title, p.description, p.instructions,
-                    p.parser_name, p.parser_version
-             FROM chatgpt_archive.projects p
+    let rows: Vec<ProjectRow> = sqlx::query_as(&format!(
+        "{PROJECT_SELECT}
              JOIN chatgpt_archive.export_entity_observations o
                ON o.entity_kind = 'project' AND o.entity_id = p.id
-             WHERE o.export_id = $1 ORDER BY p.external_id, p.id",
-    )
+             WHERE o.export_id = $1 ORDER BY p.external_id, p.id"
+    ))
     .bind(scope.export_id)
     .fetch_all(&mut **transaction)
     .await?;
     let mut candidates = Vec::new();
-    for (id, external_id, title, description, instructions, parser_name, parser_version) in rows {
-        let provenance =
-            entity_provenance(base, parser_name.as_deref(), parser_version.as_deref())?;
-        let project = AiProject {
-            ai_project_id: AiProjectId(id),
-            provider: provenance.provider.clone(),
-            external_project_id: EntityLocalId::parse(&external_id).ok(),
-            title: project_title(title.as_deref(), &external_id)?,
-            description: description.and_then(|text| AiText::parse(&text).ok()),
-            instructions: instructions.and_then(|text| AiText::parse(&text).ok()),
-            provider_created_at: None,
-            provider_updated_at: None,
-            parser_name: provenance.parser_name.clone(),
-            parser_version: provenance.parser_version.clone(),
-            extensions: Extensions::new(),
-        };
-        let content_digest = digest_of(&serde_json::to_value(&project)?)?;
+    for row in rows {
+        let id = row.0;
+        let ProjectFact {
+            project,
+            provenance,
+            digest: content_digest,
+        } = project_fact(row, base)?;
         let previous = last_emitted_digest(
             transaction,
             id,
@@ -303,7 +334,7 @@ async fn project_candidates(
             &["payload", "content_digest", "hex"],
         )
         .await?;
-        let import_provenance = provenance.clone();
+        let import_provenance = provenance;
         let event = match previous {
             Some(hex) if hex == content_digest.hex.as_str() => continue,
             Some(_) => NormalizedArchiveEvent::project_updated(&AiProjectUpdated {
@@ -355,6 +386,45 @@ fn project_title(title: Option<&str>, external_id: &str) -> Result<AiTitle, Proj
         .ok_or(ProjectionError::Unrepresentable)
 }
 
+/// A conversation as the fact carries it, with the provenance it is announced with.
+async fn conversation_fact(
+    transaction: &mut Tx<'_>,
+    row: messages::ConversationRow,
+    base: &AiArchiveProvenance,
+) -> Result<(AiArchiveProvenance, AiConversation), ProjectionError> {
+    let provenance = entity_provenance(
+        base,
+        row.parser_name.as_deref(),
+        row.parser_version.as_deref(),
+    )?;
+    let (messages, warnings) = messages::conversation_messages(
+        transaction,
+        row.id,
+        &provenance.parser_name,
+        &provenance.parser_version,
+    )
+    .await?;
+    let content_digest = AiConversation::compute_content_digest(&messages)
+        .map_err(|_| ProjectionError::Unrepresentable)?;
+    let conversation = AiConversation {
+        ai_conversation_id: AiConversationId(row.id),
+        provider: provenance.provider.clone(),
+        external_conversation_id: EntityLocalId::parse(&row.external_id).ok(),
+        owner: provenance.owner,
+        project_ref: row.project_id.map(|id| AiProjectId(id).as_entity_ref()),
+        title: row.title.and_then(|title| AiTitle::parse(&title).ok()),
+        provider_created_at: row.created_at.as_deref().and_then(wire_instant),
+        provider_updated_at: row.updated_at.as_deref().and_then(wire_instant),
+        messages,
+        content_digest,
+        parser_name: provenance.parser_name.clone(),
+        parser_version: provenance.parser_version.clone(),
+        warnings,
+        extensions: Extensions::new(),
+    };
+    Ok((provenance, conversation))
+}
+
 async fn conversation_candidates(
     transaction: &mut Tx<'_>,
     scope: &FactScope<'_>,
@@ -363,39 +433,12 @@ async fn conversation_candidates(
     let rows = messages::conversation_rows(transaction, scope.export_id).await?;
     let mut candidates = Vec::new();
     for row in rows {
-        let provenance = entity_provenance(
-            base,
-            row.parser_name.as_deref(),
-            row.parser_version.as_deref(),
-        )?;
-        let (messages, warnings) = messages::conversation_messages(
-            transaction,
-            row.id,
-            &provenance.parser_name,
-            &provenance.parser_version,
-        )
-        .await?;
-        let content_digest = AiConversation::compute_content_digest(&messages)
-            .map_err(|_| ProjectionError::Unrepresentable)?;
-        let conversation = AiConversation {
-            ai_conversation_id: AiConversationId(row.id),
-            provider: provenance.provider.clone(),
-            external_conversation_id: EntityLocalId::parse(&row.external_id).ok(),
-            owner: provenance.owner,
-            project_ref: row.project_id.map(|id| AiProjectId(id).as_entity_ref()),
-            title: row.title.and_then(|title| AiTitle::parse(&title).ok()),
-            provider_created_at: row.created_at.as_deref().and_then(wire_instant),
-            provider_updated_at: row.updated_at.as_deref().and_then(wire_instant),
-            messages,
-            content_digest: content_digest.clone(),
-            parser_name: provenance.parser_name.clone(),
-            parser_version: provenance.parser_version.clone(),
-            warnings,
-            extensions: Extensions::new(),
-        };
+        let id = row.id;
+        let (provenance, conversation) = conversation_fact(transaction, row, base).await?;
+        let content_digest = conversation.content_digest.clone();
         let previous = last_emitted_digest(
             transaction,
-            row.id,
+            id,
             &[
                 "ai_archive.conversation.added.v1",
                 "ai_archive.conversation.updated.v1",

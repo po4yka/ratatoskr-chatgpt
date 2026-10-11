@@ -14,6 +14,8 @@ XR-021 CONTRACTS.md is the single source of truth. This change implements the Ch
 - The parser executor reaches the asset verification that `parse_archive` already has. The executor takes the already-extracted artifacts' verification as an input so `reparse.rs` and `parser_migration.rs` keep one code path.
 - The survivor repair runs inside the row-removal transaction, after the deleted exports' observations are known and before they are removed, and stamps its facts one millisecond after the tombstone so the pump publishes them afterwards.
 
+- A conversation is one row per account and provider id, shared by every export that holds it, exactly as a project already was (`UNIQUE (account_id, external_id)` and an upsert that returns the row id). Without it no record is ever held by two exports and the survivor repair has nothing to repair; with it an export that reads a conversation unchanged only observes it (and its messages), and the fact it would announce is the one already queued. This changes which `ai_conversation_id` a second export announces: the first export's.
+
 ## Risks
 
 - A recreated broker restarts nothing: message ids are UUIDs, so the two-minute duplicate window no longer depends on a counter.

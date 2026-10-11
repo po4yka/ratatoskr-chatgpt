@@ -18,10 +18,11 @@ Round 3 of changeset XR-021 fixes the defects that the Round 2 native smokes and
 - An unmapped Platform user answers 403 `chatgpt.account.unmapped`. Every refused Platform receipt and every permanently failed import is logged at WARN with a closed class. `GET /v1/capabilities` carries `cache-control: no-store`.
 - `process_pending_once` reports a `failed` run that has a bound unreported operation.
 - The three `*_not_observed` gaps are no longer produced and the registered parser verifies `assets.json` through the blob store.
+- A conversation is one row per account and provider id across cumulative exports (the unique key it lacked), so the records a retained export holds can be told apart from those only a deleted export held.
 - The row-removal transaction of a privacy deletion re-announces the records a retained export still holds and removes the deleted exports' `archive.imported` heads.
 - Add `deploy/postgres/role.sql` and a README deployment paragraph; rewrite the stale status paragraphs.
 
-Breaking, with no shims: the pump's `Nats-Msg-Id` key space changes from row numbers to event ids; a service built before this round cannot complete JetStream requests under the Round 3 ACL (deploy the services of one snapshot together); an unmapped Platform user is answered 403 instead of 401; the three `*_not_observed` gaps disappear from completeness reports; an export that carries `assets.json` is imported instead of refused.
+Breaking, with no shims: the pump's `Nats-Msg-Id` key space changes from row numbers to event ids; a service built before this round cannot complete JetStream requests under the Round 3 ACL (deploy the services of one snapshot together); an unmapped Platform user is answered 403 instead of 401; the three `*_not_observed` gaps disappear from completeness reports; an export that carries `assets.json` is imported instead of refused; a second export that holds a conversation reuses its row and id instead of creating a new one.
 
 ## Impact
 

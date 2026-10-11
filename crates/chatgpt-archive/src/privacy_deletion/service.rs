@@ -30,6 +30,9 @@ pub enum PrivacyDeletionError {
     /// A validated tombstone could not be constructed.
     #[error("privacy deletion tombstone construction failed")]
     Tombstone(#[from] crate::OutboxError),
+    /// The survivors of the deletion could not be announced again.
+    #[error("privacy deletion could not announce the surviving records again")]
+    Reannounce(#[from] crate::ProjectionError),
     /// A test seam injected a finalization failure.
     #[error("privacy deletion finalization failed")]
     InjectedFinalization,
@@ -42,6 +45,9 @@ pub enum FinalizationFault {
     None,
     /// Fail after the first selected database row is removed, rolling the rows back.
     AfterFirstRemoval,
+    /// Fail after the tombstones are queued and before the survivors of the deletion are
+    /// announced again, rolling both back: the tombstone and its repair commit together.
+    AfterTombstones,
     /// Fail after the rows commit and before any byte is erased, as a crash between
     /// the row phase and the byte phase would.
     AfterRowsCommitted,

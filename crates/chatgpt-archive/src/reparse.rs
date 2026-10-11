@@ -97,12 +97,10 @@ pub struct ReparsePlan {
     pub(crate) inventory: ArchiveInventory,
     pub(crate) artifacts: Vec<ParserArtifactEvidence>,
     pub(crate) parsed: ParsedConversations,
-    pub(crate) current: BTreeMap<String, CurrentConversation>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CurrentConversation {
-    id: Uuid,
     digest: String,
 }
 
@@ -294,7 +292,6 @@ impl ReparseEngine {
             inventory,
             artifacts,
             parsed,
-            current,
         })
     }
 
@@ -525,11 +522,10 @@ pub(crate) async fn current_projection(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, external_id, digest)| {
+        .map(|(_, external_id, digest)| {
             (
                 external_id,
                 CurrentConversation {
-                    id,
                     digest: digest.unwrap_or_default(),
                 },
             )

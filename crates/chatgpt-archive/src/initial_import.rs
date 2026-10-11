@@ -205,7 +205,6 @@ impl InitialImportWorker {
                 inventory,
                 artifacts,
                 parsed,
-                current,
             },
             stored_artifacts,
         ))

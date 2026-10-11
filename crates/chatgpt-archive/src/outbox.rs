@@ -169,6 +169,13 @@ impl NormalizedArchiveEvent {
         )
     }
 
+    /// Stamps the event with the instant it happened instead of the instant of its payload.
+    #[must_use]
+    pub fn occurring_at(mut self, occurred_at: WireTimestamp) -> Self {
+        self.envelope.occurred_at = occurred_at;
+        self
+    }
+
     /// Correlates the event with the unit of work that caused it instead of itself.
     #[must_use]
     pub fn with_correlation(mut self, correlation: EntityRef) -> Self {
