@@ -201,11 +201,12 @@ async fn seed_archive(
         .execute(database.pool()).await?;
     sqlx::query("INSERT INTO chatgpt_archive.import_runs (id, export_id, parser_name, parser_version, schema_id, state) VALUES ($1, $2, 'chatgpt-test', '1.0', 'chatgpt.synthetic.migration', 'completed')")
         .bind(Uuid::now_v7()).bind(export_id).execute(database.pool()).await?;
-    sqlx::query("INSERT INTO chatgpt_archive.conversations (id, account_id, external_id) VALUES ($1, $2, 'conversation-1')")
-        .bind(conversation_id).bind(tenant_id).execute(database.pool()).await?;
+    // One row per provider conversation id for the account, shared by the archives that hold it.
+    let conversation_id: Uuid = sqlx::query_scalar("INSERT INTO chatgpt_archive.conversations (id, account_id, external_id) VALUES ($1, $2, 'conversation-1') ON CONFLICT (account_id, external_id) DO UPDATE SET updated_at = now() RETURNING id")
+        .bind(conversation_id).bind(tenant_id).fetch_one(database.pool()).await?;
     sqlx::query("INSERT INTO chatgpt_archive.export_entity_observations (export_id, entity_kind, entity_id) VALUES ($1, 'conversation', $2)")
         .bind(export_id).bind(conversation_id).execute(database.pool()).await?;
-    sqlx::query("INSERT INTO chatgpt_archive.revisions (id, entity_table, entity_id, revision_number, observed_in, payload) VALUES ($1, 'conversations', $2, 1, $3, $4)")
+    sqlx::query("INSERT INTO chatgpt_archive.revisions (id, entity_table, entity_id, revision_number, observed_in, payload) VALUES ($1, 'conversations', $2, 1, $3, $4) ON CONFLICT DO NOTHING")
         .bind(Uuid::now_v7()).bind(conversation_id).bind(export_id)
         .bind(serde_json::json!({"digest":"old-digest"})).execute(database.pool()).await?;
     Ok(SeededArchive { export_id, raw })

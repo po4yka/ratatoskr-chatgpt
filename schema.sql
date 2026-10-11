@@ -113,7 +113,10 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.conversations (
     parser_name        TEXT,
     parser_version     TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- One record per provider conversation id for an account, however many cumulative exports
+    -- contain it (XR-021 CONTRACTS.md R3-06). Every export that holds it observes this row.
+    UNIQUE (account_id, external_id)
 );
 
 CREATE TABLE IF NOT EXISTS chatgpt_archive.messages (

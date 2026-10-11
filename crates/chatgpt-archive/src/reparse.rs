@@ -676,18 +676,18 @@ pub(crate) async fn persist_projection(
     .await?;
     for parsed in &plan.parsed.conversations {
         let digest = conversation_digest(parsed);
-        let id = plan
-            .current
-            .get(&parsed.external_id)
-            .map_or_else(Uuid::now_v7, |current| current.id);
-        sqlx::query(
+        // One row per provider conversation id for the account, shared by every export that
+        // holds it (XR-021 CONTRACTS.md R3-06).
+        let id: Uuid = sqlx::query_scalar(
             "INSERT INTO chatgpt_archive.conversations (id, account_id, external_id)
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3)
+             ON CONFLICT (account_id, external_id) DO UPDATE SET updated_at = now()
+             RETURNING id",
         )
-        .bind(id)
+        .bind(Uuid::now_v7())
         .bind(plan.tenant_id)
         .bind(&parsed.external_id)
-        .execute(&mut **transaction)
+        .fetch_one(&mut **transaction)
         .await?;
         sqlx::query(
             "INSERT INTO chatgpt_archive.export_entity_observations
@@ -698,11 +698,39 @@ pub(crate) async fn persist_projection(
         .bind(id)
         .execute(&mut **transaction)
         .await?;
-        let unchanged = plan
-            .current
-            .get(&parsed.external_id)
-            .is_some_and(|current| current.digest == digest);
-        if unchanged {
+        let latest: Option<String> = sqlx::query_scalar(
+            "SELECT payload ->> 'digest' FROM chatgpt_archive.revisions
+             WHERE entity_table = 'conversations' AND entity_id = $1
+             ORDER BY revision_number DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .flatten();
+        if latest.as_deref() == Some(digest.as_str()) {
+            // Read again, unchanged: the export saw it, and nothing else about it moves.
+            sqlx::query(
+                "UPDATE chatgpt_archive.conversations
+                 SET first_seen_export = COALESCE(first_seen_export, $2), last_seen_export = $2
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(plan.export_id)
+            .execute(&mut **transaction)
+            .await?;
+            // Its messages are evidence of this export too, so deleting an earlier export
+            // keeps them with the conversation that stays.
+            sqlx::query(
+                "INSERT INTO chatgpt_archive.export_entity_observations
+                 (export_id, entity_kind, entity_id)
+                 SELECT $1, 'message', m.id FROM chatgpt_archive.messages m
+                 WHERE m.conversation_id = $2
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(plan.export_id)
+            .bind(id)
+            .execute(&mut **transaction)
+            .await?;
             continue;
         }
         let revision: i32 = sqlx::query_scalar(
