@@ -1,7 +1,7 @@
 //! Cumulative exports of one account share one row per conversation (XR-021 CONTRACTS.md R3-06,
 //! the identity every export-scoped fact, observation and deletion decision stands on).
 //!
-//! ChatGPT exports repeat what earlier exports held. A conversation is one record of the account
+//! `ChatGPT` exports repeat what earlier exports held. A conversation is one record of the account
 //! however many exports contain it: each export observes it, and a later export that reads the
 //! same content announces nothing, because the fact it would announce already exists.
 
