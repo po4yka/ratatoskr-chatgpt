@@ -52,10 +52,21 @@ fn free_port() -> u16 {
     panic!("no free loopback port for the private broker");
 }
 
+fn spawn_server(config_path: &Path) -> Child {
+    Command::new("nats-server")
+        .arg("-c")
+        .arg(config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("nats-server is on PATH (the gate copies it out of the pinned NATS image)")
+}
+
 /// A running broker; the process and its files are removed on drop.
 pub(crate) struct PrivateBroker {
     child: Child,
     directory: PathBuf,
+    config_path: PathBuf,
     port: u16,
     monitor_port: u16,
     administrator_seed: String,
@@ -122,16 +133,11 @@ impl PrivateBroker {
         let service_seed_path = directory.join("chatgpt.nkey");
         std::fs::write(&service_seed_path, service.seed().expect("a service seed"))
             .expect("the seed is written");
-        let child = Command::new("nats-server")
-            .arg("-c")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("nats-server is on PATH (the gate copies it out of the pinned NATS image)");
+        let child = spawn_server(&config_path);
         let broker = Self {
             child,
             directory,
+            config_path,
             port,
             monitor_port,
             administrator_seed: administrator.seed().expect("an administrator seed"),
@@ -183,6 +189,14 @@ impl PrivateBroker {
     pub(crate) fn stop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    /// Stops the server and starts it again on the same ports with the same stored streams, so a
+    /// client that stayed connected has lost its connection and must get a new one.
+    pub(crate) fn restart(&mut self) {
+        self.stop();
+        self.child = spawn_server(&self.config_path);
+        self.wait_until_listening();
     }
 
     fn wait_until_listening(&self) {

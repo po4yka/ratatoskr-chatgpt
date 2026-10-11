@@ -53,19 +53,49 @@ pub(crate) fn connect_options(nkey_seed: &str) -> async_nats::ConnectOptions {
 }
 
 /// The persistent queue that delivers archive events to `JetStream`.
+///
+/// Clones share one broker connection, created the first time a pass has something to publish.
 #[derive(Debug, Clone)]
 pub struct ArchiveEventOutbox {
     pool: sqlx::PgPool,
+    connection: std::sync::Arc<tokio::sync::Mutex<Option<Connection>>>,
+}
+
+/// The broker connection of the pump and whether its client has been closed.
+#[derive(Debug, Clone)]
+struct Connection {
+    client: async_nats::Client,
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Connection {
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn mark_closed(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl ArchiveEventOutbox {
     /// Uses the established service database pool; it never creates a pool per pass.
     #[must_use]
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            connection: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        }
     }
 
-    /// Connects with the service identity and publishes one bounded batch.
+    /// Publishes one bounded batch through the pump's broker connection.
+    ///
+    /// A pass with no pending row returns before touching the network. The first pass
+    /// that has a row connects with the service identity; later passes reuse that
+    /// connection. async-nats reconnects by itself while the connection is merely
+    /// disconnected, and the pump opens a new one only after the client reports it
+    /// closed (XR-021 CONTRACTS.md R3-07 rule 1).
     ///
     /// # Errors
     ///
@@ -76,41 +106,57 @@ impl ArchiveEventOutbox {
         endpoint: &str,
         nkey_seed_path: &std::path::Path,
     ) -> Result<usize, PublishError> {
+        let rows = self.pending_rows().await?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let connection = self.connection(endpoint, nkey_seed_path).await?;
+        self.publish_rows(&connection, rows).await
+    }
+
+    /// Drains the pump's connection so queued publishes are flushed before the service
+    /// exits. The next pass, if there is one, opens a new connection.
+    pub async fn close(&self) {
+        if let Some(connection) = self.connection.lock().await.as_ref() {
+            connection.mark_closed();
+            let _ = connection.client.drain().await;
+        }
+    }
+
+    /// The live connection, or a new one when none exists yet or the client was closed.
+    async fn connection(
+        &self,
+        endpoint: &str,
+        nkey_seed_path: &std::path::Path,
+    ) -> Result<Connection, PublishError> {
+        let mut slot = self.connection.lock().await;
+        if let Some(connection) = slot.as_ref().filter(|connection| !connection.is_closed()) {
+            return Ok(connection.clone());
+        }
         let seed = tokio::fs::read_to_string(nkey_seed_path)
             .await
             .map_err(PublishError::broker)?;
+        let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&closed);
         let client = connect_options(&seed)
+            .event_callback(move |event| {
+                let flag = std::sync::Arc::clone(&flag);
+                async move {
+                    if matches!(event, async_nats::Event::Closed) {
+                        flag.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+            })
             .connect(endpoint)
             .await
             .map_err(PublishError::broker)?;
-        self.publish_pending_with(&async_nats::jetstream::new(client))
-            .await
+        let connection = Connection { client, closed };
+        *slot = Some(connection.clone());
+        Ok(connection)
     }
 
-    /// Publishes one bounded batch through an established `JetStream` context and
-    /// marks only broker-acknowledged rows.
-    ///
-    /// Rows go out in id order and each row id is the `JetStream` message id, so a
-    /// crash after acknowledgement but before the SQL update redelivers a message
-    /// the stream collapses. A row the broker did not acknowledge stays unpublished,
-    /// records a safe failure class and waits out a bounded backoff, so one refused
-    /// row never starves the rows behind it. A transient failure never gives a row
-    /// up. A row larger than the connected server accepts can never be delivered: it
-    /// is marked undeliverable at once, skipped from then on, counted, and does not
-    /// fail the pass, so it neither wedges the pump nor flips readiness.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PublishError::UnknownEventType`] or [`PublishError::InvalidRow`]
-    /// for a row this service cannot have produced; both stop the pass without
-    /// publishing that row. Returns [`PublishError::Broker`] when any row was not
-    /// acknowledged. A `PubAck` timeout is indistinguishable from a permission
-    /// denial, so check the NATS server log for a Publish Violation.
-    pub async fn publish_pending_with(
-        &self,
-        jetstream: &async_nats::jetstream::Context,
-    ) -> Result<usize, PublishError> {
-        let rows = sqlx::query(
+    async fn pending_rows(&self) -> Result<Vec<sqlx::postgres::PgRow>, PublishError> {
+        sqlx::query(
             "SELECT id, event_type, payload FROM chatgpt_archive.outbox_events
              WHERE published_at IS NULL AND undeliverable_at IS NULL
                AND next_attempt_at <= now()
@@ -119,10 +165,36 @@ impl ArchiveEventOutbox {
         .bind(BATCH_SIZE)
         .fetch_all(&self.pool)
         .await
-        .map_err(PublishError::Database)?;
+        .map_err(PublishError::Database)
+    }
 
-        let deliverable_bytes = jetstream
-            .client()
+    /// Publishes `rows` in id order and marks only broker-acknowledged rows.
+    ///
+    /// Each message is named by its envelope `event_id`, so a crash after
+    /// acknowledgement but before the SQL update redelivers a message the stream
+    /// collapses, and the key space cannot collide with another producer's. A row the
+    /// broker did not acknowledge stays unpublished, records a safe failure class and
+    /// waits out a bounded backoff, so one refused row never starves the rows behind
+    /// it. A transient failure never gives a row up. A row larger than the connected
+    /// server accepts can never be delivered: it is marked undeliverable at once,
+    /// skipped from then on, counted, and does not fail the pass, so it neither wedges
+    /// the pump nor flips readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublishError::UnknownEventType`] or [`PublishError::InvalidRow`]
+    /// for a row this service cannot have produced; both stop the pass without
+    /// publishing that row. Returns [`PublishError::Broker`] when any row was not
+    /// acknowledged. A `PubAck` timeout is indistinguishable from a permission
+    /// denial, so check the NATS server log for a Publish Violation.
+    async fn publish_rows(
+        &self,
+        connection: &Connection,
+        rows: Vec<sqlx::postgres::PgRow>,
+    ) -> Result<usize, PublishError> {
+        let jetstream = async_nats::jetstream::new(connection.client.clone());
+        let deliverable_bytes = connection
+            .client
             .server_info()
             .max_payload
             .saturating_sub(PAYLOAD_HEADROOM_BYTES);
@@ -135,17 +207,20 @@ impl ArchiveEventOutbox {
                 row.try_get("payload").map_err(PublishError::Database)?;
             let subject =
                 subject_for_event_type(&event_type).ok_or(PublishError::UnknownEventType)?;
-            let body = stored_envelope_bytes(&event_type, &payload)?;
+            let (body, event_id) = stored_envelope(&event_type, &payload)?;
             if body.len() > deliverable_bytes {
                 self.mark_undeliverable(id).await?;
                 continue;
             }
-            match publish_row(jetstream, subject, id, body).await {
+            match publish_row(&jetstream, subject, &event_id, body).await {
                 Ok(()) => {
                     self.mark_published(id).await?;
                     published += 1;
                 }
                 Err(error) => {
+                    if error.is_closed_connection() {
+                        connection.mark_closed();
+                    }
                     self.record_failure(id).await?;
                     first_failure.get_or_insert(error);
                 }
@@ -210,28 +285,28 @@ impl ArchiveEventOutbox {
     }
 }
 
-/// The stored document as the bytes to publish, after proving it is the envelope of
-/// the row's declared type.
-fn stored_envelope_bytes(
+/// The stored document as the bytes to publish and its event id, after proving it is the
+/// envelope of the row's declared type.
+fn stored_envelope(
     event_type: &str,
     payload: &serde_json::Value,
-) -> Result<Vec<u8>, PublishError> {
+) -> Result<(Vec<u8>, String), PublishError> {
     let bytes = serde_json::to_vec(payload).map_err(PublishError::Encode)?;
     let envelope = EventEnvelope::from_json(&bytes).map_err(|_| PublishError::InvalidRow)?;
     if envelope.event_type.to_wire() != event_type {
         return Err(PublishError::InvalidRow);
     }
-    Ok(bytes)
+    Ok((bytes, envelope.event_id.to_string()))
 }
 
 async fn publish_row(
     jetstream: &async_nats::jetstream::Context,
     subject: &'static str,
-    id: i64,
+    event_id: &str,
     body: Vec<u8>,
 ) -> Result<(), PublishError> {
     let mut headers = async_nats::HeaderMap::new();
-    headers.insert("Nats-Msg-Id", id.to_string());
+    headers.insert("Nats-Msg-Id", event_id);
     let acknowledgement = jetstream
         .publish_with_headers(subject, headers, body.into())
         .await
@@ -269,6 +344,19 @@ pub enum PublishError {
 impl PublishError {
     fn broker(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Broker(Box::new(error))
+    }
+
+    /// Whether the client could not even hand the message to its connection task, which only
+    /// happens once the client is closed.
+    fn is_closed_connection(&self) -> bool {
+        match self {
+            Self::Broker(source) => source
+                .downcast_ref::<async_nats::jetstream::context::PublishError>()
+                .is_some_and(|error| {
+                    error.kind() == async_nats::jetstream::context::PublishErrorKind::BrokenPipe
+                }),
+            _ => false,
+        }
     }
 
     /// Whether retrying the pass can ever succeed. A row this service cannot have

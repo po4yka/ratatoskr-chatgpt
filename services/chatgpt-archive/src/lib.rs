@@ -539,7 +539,7 @@ async fn archive_event_loop(
 ) {
     loop {
         if *stopped.borrow() {
-            return;
+            break;
         }
         let pass = outbox
             .publish_pending_once(&endpoint, &nkey_seed_path)
@@ -551,18 +551,20 @@ async fn archive_event_loop(
             if error.is_fatal() {
                 tracing::error!(%error, "the archive event publisher cannot continue");
                 let _ = fatal.send(true);
-                return;
+                break;
             }
         }
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(2)) => {},
             changed = stopped.changed() => {
                 if changed.is_err() || *stopped.borrow() {
-                    return;
+                    break;
                 }
             }
         }
     }
+    // Flush what the connection still holds before the service exits.
+    outbox.close().await;
 }
 
 async fn initial_import_loop(

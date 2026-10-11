@@ -9,8 +9,8 @@
 
 ## 3. One connection, event-id message names (R3-07 rules 1 and 4)
 
-- [ ] 3.1 RED: `tests/normalized_events.rs` `the_pump_opens_one_connection_for_many_passes`, `an_empty_pass_makes_no_network_call` and `the_message_id_is_the_event_id` fail; `the_pump_reconnects_after_the_connection_is_closed` pins behaviour that already held.
-- [ ] 3.2 GREEN: a lazily created shared client, an early return for an empty pass, replacement of a closed client, and `event_id` as `Nats-Msg-Id`.
+- [x] 3.1 RED: `tests/normalized_events.rs` `the_pump_opens_one_connection_for_many_passes` (20 connections), `an_empty_pass_makes_no_network_call` (connection refused) and `the_message_id_is_the_event_id` (header was the row number) failed, as did `pending_rows_include_unpublished_tombstones_in_id_order` once it compared the header with the event id; `the_pump_reconnects_after_the_connection_is_closed` (a broker restart) pins behaviour that already held. `a_closed_connection_is_replaced_by_the_next_pass` needs the new `close()` method and was written with the GREEN step, so it was not run red.
+- [x] 3.2 GREEN: a lazily created shared client, an early return for an empty pass, replacement of a closed client, and `event_id` as `Nats-Msg-Id`.
 
 ## 4. Unmapped user is 403, refusals are logged (R3-03 rule 3, R3-07 rules 2 and 3)
 

@@ -15,7 +15,8 @@ use ratatoskr_ai_archive_contracts::{
 use ratatoskr_chatgpt_archive::NormalizedArchiveEvent;
 use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, DigestHex, Extensions};
 
-use common::outbox::{OWNER, enqueue, seed_file, tombstone};
+use common::broker::PrivateBroker;
+use common::outbox::{OWNER, enqueue, enqueue_tombstone, seed_file, tombstone};
 
 const PROVENANCE: &str = r#"{
   "ai_archive_id":"018f0000-0000-7000-8000-000000000402",
@@ -254,10 +255,16 @@ async fn pending_rows_include_unpublished_tombstones_in_id_order() {
             .headers
             .get("Nats-Msg-Id")
             .map(ToString::to_string)
-            .expect("every message carries its row id");
+            .expect("every message carries its event id");
         ids.push(id);
     }
-    assert_eq!(ids, ["1", "2", "3"], "rows go out in id order");
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT payload->>'event_id' FROM chatgpt_archive.outbox_events ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("the outbox is readable");
+    assert_eq!(ids, stored, "rows go out in id order, named by event id");
     let _ = jetstream.delete_stream(STREAM).await;
     database.discard().await;
 }
@@ -422,11 +429,10 @@ async fn an_undeliverable_row_does_not_wedge_the_pump() {
     let limit = client.server_info().max_payload;
     let jetstream = async_nats::jetstream::new(client);
     let mut stream = fresh_events_stream(&jetstream).await;
-    let small = NormalizedArchiveEvent::tombstoned(&tombstone(r#"{"subject_kind":"archive"}"#))
-        .expect("a valid tombstone encodes");
-    enqueue(database.pool(), &small).await;
+    // Two distinct events: the broker collapses messages that share an event id.
+    enqueue_tombstone(database.pool()).await;
     enqueue_padded_tombstone(database.pool(), limit).await;
-    enqueue(database.pool(), &small).await;
+    enqueue_tombstone(database.pool()).await;
     let seed = seed_file();
 
     let pump = pump(database.pool());
@@ -512,6 +518,177 @@ async fn transient_refusals_never_make_a_row_undeliverable() {
         (1, Some("not_acknowledged"))
     );
     drop(stream);
+    let _ = jetstream.delete_stream(STREAM).await;
+    database.discard().await;
+}
+
+// ---- one connection, event-id message names (XR-021 CONTRACTS.md R3-07 rules 1 and 4) ----
+
+/// Creates the events stream on a private broker, the way Edge does.
+async fn provision(broker: &PrivateBroker) -> async_nats::jetstream::Context {
+    let client = async_nats::connect(broker.url())
+        .await
+        .expect("the private broker accepts connections");
+    let jetstream = async_nats::jetstream::new(client);
+    jetstream
+        .get_or_create_stream(async_nats::jetstream::stream::Config {
+            name: "ratatoskr_events".to_owned(),
+            subjects: vec!["evt.>".to_owned()],
+            ..Default::default()
+        })
+        .await
+        .expect("the events stream exists");
+    jetstream
+}
+
+#[tokio::test]
+async fn the_pump_opens_one_connection_for_many_passes() {
+    let broker = PrivateBroker::plain();
+    let _provisioning = provision(&broker).await;
+    let database = common::DisposableDatabase::create().await;
+    let seed = seed_file();
+    let outbox = pump(database.pool());
+    let before = broker.total_connections();
+
+    for pass in 0..20 {
+        if pass % 3 == 0 {
+            enqueue_tombstone(database.pool()).await;
+        }
+        outbox
+            .publish_pending_once(&broker.url(), seed.path())
+            .await
+            .expect("the pass succeeds");
+    }
+
+    let published: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chatgpt_archive.outbox_events WHERE published_at IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await
+    .expect("the outbox is readable");
+    assert_eq!(published, 7, "every enqueued row was delivered");
+    assert!(
+        broker.total_connections() - before <= 1,
+        "twenty passes, some empty, opened {} connections",
+        broker.total_connections() - before
+    );
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn an_empty_pass_makes_no_network_call() {
+    let mut broker = PrivateBroker::plain();
+    let database = common::DisposableDatabase::create().await;
+    let seed = seed_file();
+    broker.stop();
+
+    let published = pump(database.pool())
+        .publish_pending_once(&broker.url(), seed.path())
+        .await
+        .expect("a pass with nothing pending never needs the broker");
+
+    assert_eq!(published, 0);
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn the_pump_reconnects_after_the_connection_is_closed() {
+    let mut broker = PrivateBroker::plain();
+    let _provisioning = provision(&broker).await;
+    let database = common::DisposableDatabase::create().await;
+    let seed = seed_file();
+    let outbox = pump(database.pool());
+    enqueue_tombstone(database.pool()).await;
+    assert_eq!(
+        outbox
+            .publish_pending_once(&broker.url(), seed.path())
+            .await
+            .expect("the first pass publishes"),
+        1
+    );
+
+    // The server goes away and comes back with its streams: the pump's connection is lost.
+    broker.restart();
+    enqueue_tombstone(database.pool()).await;
+    let mut published = 0;
+    for _ in 0..40 {
+        published += outbox
+            .publish_pending_once(&broker.url(), seed.path())
+            .await
+            .unwrap_or(0);
+        if published == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    assert_eq!(
+        published, 1,
+        "the pump delivered after the broker restarted"
+    );
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn a_closed_connection_is_replaced_by_the_next_pass() {
+    let broker = PrivateBroker::plain();
+    let _provisioning = provision(&broker).await;
+    let database = common::DisposableDatabase::create().await;
+    let seed = seed_file();
+    let outbox = pump(database.pool());
+    let before = broker.total_connections();
+    enqueue_tombstone(database.pool()).await;
+    outbox
+        .publish_pending_once(&broker.url(), seed.path())
+        .await
+        .expect("the first pass publishes");
+
+    outbox.close().await;
+    enqueue_tombstone(database.pool()).await;
+    let published = outbox
+        .publish_pending_once(&broker.url(), seed.path())
+        .await
+        .expect("the pass after the close publishes through a new connection");
+
+    assert_eq!(published, 1);
+    assert_eq!(
+        broker.total_connections() - before,
+        2,
+        "one connection before the close and one after it"
+    );
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn the_message_id_is_the_event_id() {
+    let _guard = stream_guard().await;
+    let database = common::DisposableDatabase::create().await;
+    let client = async_nats::connect(common::nats_url())
+        .await
+        .expect("the test broker accepts connections");
+    let jetstream = async_nats::jetstream::new(client);
+    let stream = fresh_events_stream(&jetstream).await;
+    let event_id = enqueue_tombstone(database.pool()).await;
+    let seed = seed_file();
+
+    pump(database.pool())
+        .publish_pending_once(&common::nats_url(), seed.path())
+        .await
+        .expect("the pump publishes");
+
+    let message = stream
+        .get_raw_message(1)
+        .await
+        .expect("the stream holds the message");
+    assert_eq!(
+        message
+            .headers
+            .get("Nats-Msg-Id")
+            .map(ToString::to_string)
+            .as_deref(),
+        Some(event_id.as_str()),
+        "the broker deduplicates on the envelope's event id, not on a row number"
+    );
     let _ = jetstream.delete_stream(STREAM).await;
     database.discard().await;
 }
