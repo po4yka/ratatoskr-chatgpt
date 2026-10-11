@@ -36,8 +36,8 @@
 
 ## 8. Provisioning and documentation (R3-11, R3-19)
 
-- [ ] 8.1 RED: `tests/config.rs` `the_example_role_file_exists` fails because `deploy/postgres/role.sql` does not exist.
-- [ ] 8.2 GREEN: `deploy/postgres/role.sql`, a README deployment paragraph, and the rewritten status paragraphs of `DEVELOPMENT.md` and `README.md`.
+- [x] 8.1 RED: `tests/config.rs` `the_example_role_file_exists` failed because `deploy/postgres/role.sql` did not exist (the file was moved away for the run, the test having been written beside it).
+- [x] 8.2 GREEN: `deploy/postgres/role.sql`, a README deployment paragraph, and the rewritten status paragraphs of `DEVELOPMENT.md` and `README.md`.
 
 ## 9. Gate
 

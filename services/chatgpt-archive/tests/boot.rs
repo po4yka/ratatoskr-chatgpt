@@ -555,7 +555,8 @@ fn the_shipped_example_loads() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     assert!(
-        text.contains("emits no `ai_archive.*` fact") && text.contains("refused"),
+        text.contains("emits no `ai_archive.*` fact")
+            && text.contains("refused with `403 chatgpt.account.unmapped`"),
         "the mapping comment says what an unmapped account does"
     );
     Ok(())

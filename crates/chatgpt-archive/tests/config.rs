@@ -1,5 +1,10 @@
 //! Contract tests for typed configuration loading.
 
+#![allow(
+    clippy::expect_used,
+    reason = "the helper that reads the shipped example fails the test through expect"
+)]
+
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -509,4 +514,76 @@ fn max_event_bytes_defaults_and_is_bounded() {
             "the supplied value is never rendered"
         );
     }
+}
+
+// ---- XR-021 CONTRACTS.md R3-11: the operator example names a provisioned role ----
+
+/// The database URL the operator example ships, split into `(role, host_port, database)`.
+fn example_database() -> (String, String, String) {
+    let example = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/systemd/chatgpt.conf.example"
+    ))
+    .expect("the operator example is shipped");
+    let url = example
+        .lines()
+        .find_map(|line| line.strip_prefix("RATATOSKR__STORAGE__DATABASE_URL="))
+        .expect("the example names a database URL");
+    let rest = url
+        .strip_prefix("postgres://")
+        .expect("the URL is a postgres URL");
+    let (credentials, location) = rest.split_once('@').expect("the URL carries credentials");
+    let (host_port, database) = location.split_once('/').expect("the URL names a database");
+    let (role, _) = credentials
+        .split_once(':')
+        .expect("the credentials name a role");
+    (role.to_owned(), host_port.to_owned(), database.to_owned())
+}
+
+/// The role, database and port the example names are the ones `deploy/postgres/role.sql`
+/// provisions, so a deployment that follows the files can start the service.
+#[test]
+fn the_example_role_file_exists() {
+    let (role, host_port, database) = example_database();
+    assert_eq!(role, "ratatoskr_chatgpt");
+    assert_eq!(database, "ratatoskr");
+    assert_eq!(
+        host_port, "127.0.0.1:5432",
+        "the target runs PostgreSQL on 5432"
+    );
+
+    let provisioning = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/postgres/role.sql"
+    ))
+    .expect("deploy/postgres/role.sql is shipped beside the operator example");
+    assert!(
+        provisioning.contains(&format!("create role {role} login")),
+        "role.sql creates the role the example connects as"
+    );
+    assert!(
+        provisioning.contains(&format!(
+            "grant connect, create on database {database} to {role}"
+        )),
+        "role.sql grants that role the database the example names"
+    );
+    assert!(
+        provisioning.contains(&format!("\\connect {database}")),
+        "role.sql revokes the public schema inside that database"
+    );
+    assert!(
+        provisioning.contains(&format!("revoke all on schema public from {role}")),
+        "the role owns only its own schema"
+    );
+    assert!(
+        provisioning.contains("nosuperuser nocreatedb nocreaterole noreplication nobypassrls"),
+        "the role has no privilege beyond login"
+    );
+    assert!(
+        provisioning
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .all(|line| !line.to_ascii_lowercase().contains("password")),
+        "no credential belongs in the file; the password is set separately"
+    );
 }
