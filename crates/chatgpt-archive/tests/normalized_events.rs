@@ -15,6 +15,8 @@ use ratatoskr_ai_archive_contracts::{
 use ratatoskr_chatgpt_archive::NormalizedArchiveEvent;
 use ratatoskr_identifiers::{ContentDigest, DigestAlgorithm, DigestHex, Extensions};
 
+use common::outbox::{OWNER, enqueue, seed_file, tombstone};
+
 const PROVENANCE: &str = r#"{
   "ai_archive_id":"018f0000-0000-7000-8000-000000000402",
   "provider":"chatgpt", "owner":"user:018f0000-0000-7000-8000-000000000005",
@@ -144,39 +146,6 @@ fn user_requested_deletion_event_round_trips() {
 
 // ---- delivery through a real JetStream (XR-021 CONTRACTS.md sections S02 and S07) ----
 
-const OWNER: &str = "user:018f0000-0000-7000-8000-000000000005";
-
-fn tombstone(subject: &str) -> AiArchiveTombstone {
-    serde_json::from_value(serde_json::json!({
-        "ai_archive_id": "018f0000-0000-7000-8000-000000000402",
-        "provider": "chatgpt",
-        "owner": OWNER,
-        "subject": serde_json::from_str::<serde_json::Value>(subject).expect("literal subject"),
-        "reason": "user_requested",
-        "evidence_ref": {
-            "owner_service": "ratatoskr-chatgpt",
-            "digest": {"algorithm": "sha256", "hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
-            "media_type": "application/json",
-            "length_bytes": 512
-        },
-        "observed_at": "2026-08-27T06:00:00Z"
-    }))
-    .expect("a literal tombstone satisfies the contract")
-}
-
-/// A throwaway service identity. The test broker does not authenticate, but the
-/// pump connects exactly as it does in production, with an nkey seed read from a file.
-fn seed_file() -> tempfile::NamedTempFile {
-    use std::io::Write as _;
-    let seed = nkeys::KeyPair::new_user()
-        .seed()
-        .expect("a generated key pair has a seed");
-    let mut file = tempfile::NamedTempFile::new().expect("a seed file");
-    file.write_all(seed.as_bytes())
-        .expect("the seed is written");
-    file
-}
-
 /// One test at a time owns the shared stream.
 async fn stream_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -207,18 +176,6 @@ async fn stream_over(
         })
         .await
         .expect("the test stream is created")
-}
-
-async fn enqueue(pool: &sqlx::PgPool, event: &NormalizedArchiveEvent) {
-    let mut transaction = pool.begin().await.expect("a transaction");
-    ratatoskr_chatgpt_archive::Database::enqueue_normalized_event(
-        &mut transaction,
-        event,
-        &ratatoskr_chatgpt_archive::OutboxPlacement::default(),
-    )
-    .await
-    .expect("the event is enqueued");
-    transaction.commit().await.expect("the commit succeeds");
 }
 
 fn pump(pool: &sqlx::PgPool) -> ratatoskr_chatgpt_archive::receipt::ArchiveEventOutbox {

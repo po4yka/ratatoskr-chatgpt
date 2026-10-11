@@ -16,6 +16,10 @@ const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.chatgpt.operation.repor
 const PAYLOAD_HEADROOM_BYTES: usize = 1024;
 /// The safe failure class stored for a row that can never be delivered.
 const CLASS_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+/// The reply prefix of this identity. The deployed ACL lets the service subscribe only to
+/// `_INBOX_chatgpt.>`, so every connection it opens must set it (XR-021 CONTRACTS.md R3-01);
+/// without it a publish acknowledgement is never delivered and the call times out.
+pub(crate) const INBOX_PREFIX: &str = "_INBOX_chatgpt";
 const BATCH_SIZE: i64 = 32;
 const MAX_BACKOFF_SECONDS: i32 = 300;
 
@@ -38,6 +42,14 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
         "ai_archive.subject.tombstoned.v1" => "evt.ai_archive.subject.tombstoned.v1",
         _ => return None,
     })
+}
+
+/// The options of every broker connection this service opens: the nkey identity and the inbox
+/// prefix its ACL stanza allows.
+#[must_use]
+pub(crate) fn connect_options(nkey_seed: &str) -> async_nats::ConnectOptions {
+    async_nats::ConnectOptions::with_nkey(nkey_seed.trim().to_owned())
+        .custom_inbox_prefix(INBOX_PREFIX)
 }
 
 /// The persistent queue that delivers archive events to `JetStream`.
@@ -67,8 +79,7 @@ impl ArchiveEventOutbox {
         let seed = tokio::fs::read_to_string(nkey_seed_path)
             .await
             .map_err(PublishError::broker)?;
-        let options = async_nats::ConnectOptions::with_nkey(seed.trim().to_owned());
-        let client = options
+        let client = connect_options(&seed)
             .connect(endpoint)
             .await
             .map_err(PublishError::broker)?;

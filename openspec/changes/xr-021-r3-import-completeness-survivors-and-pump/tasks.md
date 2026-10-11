@@ -4,8 +4,8 @@
 
 ## 2. Inbox prefix (R3-01)
 
-- [ ] 2.1 RED: `crates/chatgpt-archive/tests/inbox_prefix.rs` `the_pump_completes_jetstream_requests_under_its_inbox_prefix` times out because the pump uses the default inbox and the broker allows only `_INBOX_chatgpt.>`.
-- [ ] 2.2 GREEN: `INBOX_PREFIX` applied with `custom_inbox_prefix` in one connect-options function, `deploy/nats/identity.conf`, and a CI step that puts `nats-server` on `PATH`.
+- [x] 2.1 RED: `crates/chatgpt-archive/tests/inbox_prefix.rs` `the_pump_completes_jetstream_requests_under_its_inbox_prefix` times out because the pump uses the default inbox and the broker allows only `_INBOX_chatgpt.>`.
+- [x] 2.2 GREEN: `INBOX_PREFIX` applied with `custom_inbox_prefix` in one connect-options function, `deploy/nats/identity.conf`, and a CI step that puts `nats-server` on `PATH`.
 
 ## 3. One connection, event-id message names (R3-07 rules 1 and 4)
 

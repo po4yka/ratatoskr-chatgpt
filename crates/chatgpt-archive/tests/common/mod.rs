@@ -15,6 +15,9 @@
 
 use std::io::Write as _;
 
+pub(crate) mod broker;
+pub(crate) mod outbox;
+
 use ratatoskr_chatgpt_archive::Database;
 use ratatoskr_chatgpt_archive::config::{Limits, StorageConfig};
 use secrecy::SecretString;

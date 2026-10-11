@@ -95,6 +95,16 @@ jobs:
           docker logs chatgpt-ci-nats
           exit 1
 
+      # `inbox_prefix.rs` and the connection-count tests start their own authorization-enabled
+      # brokers, so the server binary must be on PATH. It is the one the container above runs.
+      - name: Put nats-server on PATH
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          docker cp chatgpt-ci-nats:/usr/local/bin/nats-server "$RUNNER_TEMP/bin/nats-server"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/nats-server" --version
+
       - run: cargo fetch --locked
 
       - run: cargo fmt --all -- --check

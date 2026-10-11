@@ -55,6 +55,8 @@ JetStream named by `CHATGPT_TEST_NATS_URL` (a `nats-server -js`). Those tests fa
 when either variable is unset, because a skipped broker test proves nothing about delivery. CI starts
 the broker in the `Start disposable JetStream` step of `ci.yml`; locally `docker compose up -d postgres nats` starts both, on `127.0.0.1:5439` and `127.0.0.1:4229`.
 
+Two more test files start a private `nats-server` of their own, so the binary must be on `PATH`: `inbox_prefix.rs` runs the pump against a broker whose only user is the stanza of `deploy/nats/identity.conf`, and the connection-count tests read the server's monitoring endpoint. CI copies the binary out of the pinned NATS container in the `Put nats-server on PATH` step; locally `brew install nats-server` or a copy from the container does the same. `CHATGPT_TEST_PORT_BASE` confines those private brokers to twenty loopback ports from that base; without it the operating system picks the ports.
+
 ## Deployed configuration
 
 `deploy/systemd/chatgpt.conf.example` is the operator example; `services/chatgpt-archive/tests/boot.rs` (`the_shipped_example_loads`) loads it through `Config::from_environment`. The receipt listener (`RATATOSKR__RECEIPT__LISTEN_ADDRESS`, default `127.0.0.1:8096`), the operator listener (`RATATOSKR__ADMIN__LISTEN_ADDRESS`, default `127.0.0.1:9085`), the event bus (`RATATOSKR__RECEIPT__EVENT_BUS_URL` and `RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH`), the account mapping (`RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS`) and the enqueue-time size guard (`RATATOSKR__RECEIPT__MAX_EVENT_BYTES`) are described in `README.md` under "Deployed configuration". A change to any of these keys updates the example in the same commit.
