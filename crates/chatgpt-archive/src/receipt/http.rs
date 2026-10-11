@@ -17,8 +17,8 @@ use axum::routing::{get, post};
 use axum::{Json, extract::State};
 use futures_util::TryStreamExt as _;
 use ratatoskr_ai_archive_contracts::platform_receipt::{
-    CAPABILITIES_PATH, HEADER_ARCHIVE_BYTE_SIZE, HEADER_ARCHIVE_SHA256, HEADER_CORRELATION_ID,
-    HEADER_DEVICE_ID, HEADER_OPERATION_ID, HEADER_USER_ID, RECEIPT_PATH,
+    ARCHIVE_MEDIA_TYPE, CAPABILITIES_PATH, HEADER_ARCHIVE_BYTE_SIZE, HEADER_ARCHIVE_SHA256,
+    HEADER_CORRELATION_ID, HEADER_DEVICE_ID, HEADER_OPERATION_ID, HEADER_USER_ID, RECEIPT_PATH,
     receipt_capability_document,
 };
 
@@ -164,12 +164,13 @@ async fn receive_platform_archive(
     else {
         return crate::fault::reject(FailureKind::Unauthenticated);
     };
-    let Some(media_type) = headers
+    // XR-021 CONTRACTS.md R2-15 and S06 D1: the literal value, no parameters, no other case.
+    let media_type = headers
         .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-    else {
+        .map(axum::http::HeaderValue::as_bytes);
+    if media_type != Some(ARCHIVE_MEDIA_TYPE.as_bytes()) {
         return crate::fault::reject(FailureKind::InvalidRequest);
-    };
+    }
     let stream = http_body_util::BodyStream::new(body).map_ok(|frame| match frame.into_data() {
         Ok(data) => data,
         Err(_) => bytes::Bytes::new(),
@@ -178,7 +179,7 @@ async fn receive_platform_archive(
         .receiver
         .receive_platform_archive(
             &principal,
-            media_type,
+            ARCHIVE_MEDIA_TYPE,
             expected_size,
             &expected_sha256,
             operation,

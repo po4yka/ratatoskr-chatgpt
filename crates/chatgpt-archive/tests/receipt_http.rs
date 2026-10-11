@@ -553,3 +553,96 @@ async fn missing_acquisition_or_media_type_answer_400() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "unknown acquisition value");
 }
+
+/// A Platform receipt for `GOOD_BODY` carrying every claim, with the `Content-Type` under test.
+fn platform_request(media_type: Option<&str>) -> Request<Body> {
+    let total: u64 = GOOD_BODY.iter().map(|chunk| chunk.len() as u64).sum();
+    let mut request = request_at(
+        ratatoskr_ai_archive_contracts::platform_receipt::RECEIPT_PATH,
+        "POST",
+        None,
+        None,
+        media_type,
+        Some(total),
+        byte_stream(GOOD_BODY.to_vec()),
+    );
+    for (name, value) in [
+        (
+            "x-ratatoskr-user-id",
+            "00000000-0000-0000-0000-000000000011",
+        ),
+        (
+            "x-ratatoskr-device-id",
+            "00000000-0000-0000-0000-000000000012",
+        ),
+        (
+            "x-correlation-id",
+            "correlation:00000000-0000-0000-0000-000000000013",
+        ),
+        (
+            "x-ratatoskr-operation-id",
+            "00000000-0000-0000-0000-000000000014",
+        ),
+        (
+            "x-ratatoskr-archive-sha256",
+            "1d99fb3667bdf788ccfcc99afe73c8ee02480e5aa3afecf3403c85eec47b84db",
+        ),
+    ] {
+        request
+            .headers_mut()
+            .insert(name, value.parse().expect("claim header"));
+    }
+    request.headers_mut().insert(
+        "x-ratatoskr-archive-byte-size",
+        total.to_string().parse().expect("size header"),
+    );
+    request
+}
+
+/// XR-021 CONTRACTS.md R2-15 and S06 D1: the Platform receipt takes `application/zip` exactly, with
+/// no parameters and no other letter case, and answers anything else as an error envelope.
+#[tokio::test]
+async fn platform_receipt_rejects_any_content_type_but_application_zip() {
+    for refused in [
+        Some("application/octet-stream"),
+        Some("application/zip; charset=binary"),
+        Some("APPLICATION/ZIP"),
+        None,
+    ] {
+        let fixture = fixture(u64::MAX);
+        let (status, json) = send(&fixture.app, platform_request(refused)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "refused: {refused:?}");
+        let envelope: ratatoskr_error_contracts::ErrorEnvelope = serde_json::from_value(json)
+            .unwrap_or_else(|error| panic!("{refused:?} must answer an ErrorEnvelope: {error}"));
+        assert_eq!(envelope.code.as_str(), "chatgpt.request.invalid");
+    }
+
+    let fixture = fixture(u64::MAX);
+    let (status, _) = send(&fixture.app, platform_request(Some("application/zip"))).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the exact media type is accepted"
+    );
+}
+
+/// The tenant-token receipt is a different route with its own media-type rule, which this change
+/// leaves alone.
+#[tokio::test]
+async fn tenant_token_receipt_keeps_its_media_type_rule() {
+    let fixture = fixture(u64::MAX);
+    let total: u64 = GOOD_BODY.iter().map(|chunk| chunk.len() as u64).sum();
+    let (status, _) = send(
+        &fixture.app,
+        request(
+            "POST",
+            Some("Bearer tok-alpha"),
+            Some("consumer_export"),
+            Some("application/octet-stream"),
+            Some(total),
+            byte_stream(GOOD_BODY.to_vec()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}

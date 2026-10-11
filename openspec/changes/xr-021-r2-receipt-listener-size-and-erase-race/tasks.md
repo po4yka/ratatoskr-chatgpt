@@ -9,8 +9,8 @@
 
 ## 3. Exact media type on the Platform receipt (R2-15)
 
-- [ ] 3.1 RED: `crates/chatgpt-archive/tests/receipt_http.rs` `platform_receipt_rejects_any_content_type_but_application_zip` fails for `application/octet-stream`, `application/zip; charset=binary` and `APPLICATION/ZIP` because they are accepted.
-- [ ] 3.2 GREEN: compare the header value with `ARCHIVE_MEDIA_TYPE` before streaming.
+- [x] 3.1 RED: `crates/chatgpt-archive/tests/receipt_http.rs` `platform_receipt_rejects_any_content_type_but_application_zip` fails for `application/octet-stream`, `application/zip; charset=binary` and `APPLICATION/ZIP` because they are accepted.
+- [x] 3.2 GREEN: compare the header value with `ARCHIVE_MEDIA_TYPE` before streaming.
 
 ## 4. Size guard, undeliverable rows and honest reports (R2-04)
 
