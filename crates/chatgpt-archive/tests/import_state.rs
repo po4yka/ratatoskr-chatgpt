@@ -284,3 +284,201 @@ async fn a_permanent_import_failure_is_logged_with_a_class() {
     );
     database.discard().await;
 }
+
+// ---- XR-021 CONTRACTS.md R3-05: an import can be complete ----
+
+const ARCHIVE_CONVERSATIONS: &[u8] =
+    include_bytes!("fixtures/synthetic_archive_conversations.json");
+const NOTE: &[u8] = include_bytes!("fixtures/assets/note.txt");
+
+/// The shared project and canvas fixtures carry a `future_*` field on purpose, which is a real
+/// gap; these are the same documents without it, so the only gaps a test sees are its own.
+fn clean_projects() -> Vec<u8> {
+    serde_json::json!([{
+        "id": "project-alpha",
+        "title": "Synthetic project",
+        "description": "Invented fixture only",
+        "instructions": [
+            { "id": "instruction-alpha", "kind": "instruction", "content": "Preserve evidence." }
+        ],
+        "conversation_ids": ["conversation-project"],
+        "asset_ids": ["asset-uploaded"]
+    }])
+    .to_string()
+    .into_bytes()
+}
+
+fn clean_canvas() -> Vec<u8> {
+    serde_json::json!([{
+        "id": "canvas-alpha",
+        "project_id": "project-alpha",
+        "conversation_id": "conversation-project",
+        "content": ["# Inert Canvas", { "kind": "code", "text": "never execute" }]
+    }])
+    .to_string()
+    .into_bytes()
+}
+
+/// The `assets.json` that declares `NOTE` under `assets/note.txt` with its true digest.
+fn note_declaration() -> Vec<u8> {
+    use sha2::Digest as _;
+    serde_json::json!([{
+        "id": "asset-uploaded",
+        "kind": "uploaded",
+        "display_name": "note.txt",
+        "archive_path": "assets/note.txt",
+        "media_type": "text/plain",
+        "length_bytes": NOTE.len(),
+        "sha256": hex::encode(sha2::Sha256::digest(NOTE)),
+    }])
+    .to_string()
+    .into_bytes()
+}
+
+/// What an import of `bytes` left behind: the completeness report row and the operation report.
+struct Imported {
+    run_state: String,
+    completeness: String,
+    gaps: Vec<String>,
+    asset_count: i64,
+    report: serde_json::Value,
+}
+
+async fn import(bytes: Vec<u8>) -> Imported {
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let operation = Uuid::now_v7();
+    let received = receive_export_for(
+        database.pool(),
+        &blobs,
+        "acc-complete",
+        bytes,
+        Some(PlatformOperation {
+            operation_id: operation,
+        }),
+    )
+    .await;
+    drain(&worker(&database, &blobs)).await;
+    let run_state: String =
+        sqlx::query_scalar("SELECT state FROM chatgpt_archive.import_runs WHERE export_id = $1")
+            .bind(received.export)
+            .fetch_one(database.pool())
+            .await
+            .expect("the run is readable");
+    let completeness: Option<(String, serde_json::Value, serde_json::Value)> =
+        sqlx::query_as("SELECT status, gaps, counts FROM chatgpt_archive.completeness_reports")
+            .fetch_optional(database.pool())
+            .await
+            .expect("the completeness report is readable");
+    let (completeness, gaps, counts) = completeness
+        .unwrap_or_else(|| (String::new(), serde_json::json!([]), serde_json::json!({})));
+    let report = reports(&database, operation)
+        .await
+        .into_iter()
+        .next()
+        .expect("the operation owes one report");
+    let imported = Imported {
+        run_state,
+        completeness,
+        gaps: gaps
+            .as_array()
+            .expect("gaps are an array")
+            .iter()
+            .map(|gap| gap["gap_kind"].as_str().expect("a gap kind").to_owned())
+            .collect(),
+        asset_count: counts
+            .get("assets")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        report,
+    };
+    database.discard().await;
+    imported
+}
+
+#[tokio::test]
+async fn an_export_with_only_conversations_is_complete() {
+    let imported = import(common::single_message_zip(
+        "conversation-1",
+        "Hello archive",
+    ))
+    .await;
+
+    assert!(imported.gaps.is_empty(), "no gap: {:?}", imported.gaps);
+    assert_eq!(imported.run_state, "completed");
+    assert_eq!(imported.completeness, "complete");
+    assert_eq!(imported.report["payload"]["status"], "succeeded");
+    assert!(
+        imported.report["payload"]["warnings"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "no warning on a complete import: {}",
+        imported.report["payload"]["warnings"]
+    );
+}
+
+#[tokio::test]
+async fn an_export_with_projects_canvas_and_verified_assets_is_complete() {
+    let imported = import(common::zip_of(&[
+        ("conversations.json", ARCHIVE_CONVERSATIONS),
+        ("projects.json", &clean_projects()),
+        ("canvas.json", &clean_canvas()),
+        ("assets.json", &note_declaration()),
+        ("assets/note.txt", NOTE),
+    ]))
+    .await;
+
+    assert!(imported.gaps.is_empty(), "no gap: {:?}", imported.gaps);
+    assert_eq!(imported.run_state, "completed");
+    assert_eq!(imported.completeness, "complete");
+    assert_eq!(imported.asset_count, 1, "the verified asset is imported");
+    assert_eq!(imported.report["payload"]["status"], "succeeded");
+}
+
+#[tokio::test]
+async fn a_declared_asset_with_no_file_is_a_missing_file_gap() {
+    let imported = import(common::zip_of(&[
+        ("conversations.json", ARCHIVE_CONVERSATIONS),
+        ("projects.json", &clean_projects()),
+        ("assets.json", &note_declaration()),
+    ]))
+    .await;
+
+    assert_eq!(imported.run_state, "partial");
+    assert_eq!(imported.completeness, "structurally_partial");
+    assert_eq!(imported.gaps, ["missing_file"]);
+    assert_eq!(imported.asset_count, 0);
+    assert_eq!(imported.report["payload"]["status"], "partially_succeeded");
+    let warnings = imported.report["payload"]["warnings"]
+        .as_array()
+        .expect("warnings are an array");
+    assert_eq!(warnings.len(), 1, "exactly one incomplete-import warning");
+    assert_eq!(warnings[0]["code"], "ai_archive.import.incomplete");
+}
+
+#[tokio::test]
+async fn a_malformed_assets_json_fails_permanently() {
+    let imported = import(common::zip_of(&[
+        ("conversations.json", ARCHIVE_CONVERSATIONS),
+        ("assets.json", b"this is not json"),
+    ]))
+    .await;
+
+    assert_eq!(imported.run_state, "failed");
+    assert_eq!(imported.report["payload"]["status"], "failed");
+    assert_eq!(
+        imported.report["payload"]["error"]["code"],
+        "chatgpt.archive.invalid"
+    );
+}
+
+#[tokio::test]
+async fn an_unrecognized_record_is_still_a_gap() {
+    // The shared fixture carries a conversation field this parser does not model.
+    let imported = import(common::conversations_only_zip()).await;
+
+    assert_eq!(imported.completeness, "structurally_partial");
+    assert_eq!(imported.gaps, ["unrecognized_record"]);
+    assert_eq!(imported.report["payload"]["status"], "partially_succeeded");
+}

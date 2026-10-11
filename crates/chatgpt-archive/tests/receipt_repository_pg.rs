@@ -402,7 +402,7 @@ async fn permanent_import_failure_is_terminal_and_reported_once()
 }
 
 #[tokio::test]
-async fn completeness_counts_unobserved_archive_categories()
+async fn an_export_without_optional_sections_reports_no_gap()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = worker_test_guard().await;
     let Some(url) = test_url() else {
@@ -462,8 +462,9 @@ async fn completeness_counts_unobserved_archive_categories()
     .fetch_one(&pool)
     .await?;
     let summary = &envelope["payload"]["results"][0]["ai_archive_import_summary"];
-    assert_eq!(summary["completeness"], "structurally_partial");
-    assert_eq!(summary["gap_count"], 3);
+    // The absence of projects, canvas and assets is not a gap (XR-021 CONTRACTS.md R3-05).
+    assert_eq!(summary["completeness"], "complete");
+    assert_eq!(summary["gap_count"], 0);
     Ok(())
 }
 

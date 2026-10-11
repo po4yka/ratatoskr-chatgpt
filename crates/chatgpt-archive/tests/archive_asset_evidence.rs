@@ -10,6 +10,8 @@
 
 use std::collections::BTreeSet;
 
+mod common;
+
 use bytes::Bytes;
 use ratatoskr_chatgpt_archive::{
     AcquisitionMode, ArchiveInventory, ArtifactProvenance, AssetAvailability, BlobStore,
@@ -217,4 +219,109 @@ async fn reference_only_asset_remains_missing() {
         parsed.assets.first().and_then(|asset| asset.blob.clone()),
         None
     );
+}
+
+// ---- XR-021 CONTRACTS.md R3-05: the registered parser path verifies assets.json ----
+
+/// Runs the executor the registry resolves for `entries`, the way the importer does.
+async fn execute_registered(
+    entries: &[(&str, &[u8])],
+) -> Result<
+    ratatoskr_chatgpt_archive::ParsedConversations,
+    ratatoskr_chatgpt_archive::ParserExecutionError,
+> {
+    use ratatoskr_chatgpt_archive::{
+        ArchiveInspector, ArchiveLimits, ParserArtifactEvidence, ParserExecutionInput,
+    };
+    let root = tempfile::tempdir().expect("temporary blob root");
+    let store = BlobStore::new(root.path()).expect("blob store");
+    let archive = common::zip_of(entries);
+    let raw = store
+        .store(
+            "application/zip",
+            futures_util::stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from(archive))]),
+        )
+        .await
+        .expect("the raw archive stores");
+    let inventory = ArchiveInspector::new(
+        store.clone(),
+        ArchiveLimits {
+            max_entries: 32,
+            max_compressed_bytes: 1_048_576,
+            max_entry_bytes: 1_048_576,
+            max_decompressed_bytes: 2_097_152,
+            max_compression_ratio: 100,
+        },
+    )
+    .inspect(&raw)
+    .await
+    .expect("the archive inspects");
+    let registry = ParserRegistry::runtime().expect("the runtime registry builds");
+    let selected = match registry.select(&inventory, AcquisitionMode::ConsumerExport) {
+        ParserSelection::Selected(parser) => parser,
+        other => panic!("the synthetic parser must be selected, got {other:?}"),
+    };
+    let compiled = registry
+        .find_exact(&selected, &inventory, AcquisitionMode::ConsumerExport)
+        .expect("the selected parser is compiled");
+    let evidence: Vec<ParserArtifactEvidence> = entries
+        .iter()
+        .map(|(path, bytes)| ParserArtifactEvidence {
+            path: (*path).to_owned(),
+            bytes: Bytes::copy_from_slice(bytes),
+            quarantined: false,
+        })
+        .collect();
+    compiled
+        .execute(ParserExecutionInput {
+            inventory: &inventory,
+            artifacts: &evidence,
+            raw_archive: &raw,
+            blobs: &store,
+        })
+        .await
+}
+
+fn declaration_of_note() -> Vec<u8> {
+    use sha2::Digest as _;
+    serde_json::json!([{
+        "id": "asset-uploaded",
+        "kind": "uploaded",
+        "archive_path": "assets/note.txt",
+        "media_type": "text/plain",
+        "length_bytes": NOTE.len(),
+        "sha256": hex::encode(sha2::Sha256::digest(NOTE)),
+    }])
+    .to_string()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn an_assets_json_with_every_file_present_imports_the_assets() {
+    let parsed = execute_registered(&[
+        ("conversations.json", CONVERSATIONS),
+        ("assets.json", &declaration_of_note()),
+        ("assets/note.txt", NOTE),
+    ])
+    .await
+    .expect("an archive with a declared, present asset imports");
+
+    assert_eq!(parsed.assets.len(), 1);
+    assert_eq!(parsed.assets[0].availability, AssetAvailability::Verified);
+    let blob = parsed.assets[0]
+        .blob
+        .as_ref()
+        .expect("a verified asset keeps its blob reference");
+    assert_eq!(blob.length_bytes, NOTE.len() as u64);
+}
+
+#[tokio::test]
+async fn a_malformed_assets_json_is_a_parser_failure() {
+    let outcome = execute_registered(&[
+        ("conversations.json", CONVERSATIONS),
+        ("assets.json", b"not json"),
+    ])
+    .await;
+
+    assert!(outcome.is_err(), "a malformed declaration never imports");
 }

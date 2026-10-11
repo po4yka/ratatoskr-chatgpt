@@ -16,8 +16,9 @@ pub use model::{
 
 use crate::receipt::AcquisitionMode;
 use crate::{
-    BlobStore, ExtractedArtifact, ParserArtifactEvidence, ParserExecutionError,
-    ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration,
+    ArtifactProvenance, BlobStore, EntryKind, ExtractedArtifact, ParserArtifactEvidence,
+    ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserFuture, ParserId,
+    ParserRegistration,
 };
 
 /// All immutable evidence available to the synthetic archive parser.
@@ -79,9 +80,18 @@ pub enum SyntheticParserError {
 pub struct SyntheticConversationsParser;
 
 impl ParserExecutor for SyntheticConversationsParser {
-    fn execute(
+    fn execute<'a>(&'a self, input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move { self.execute_registered(&input).await })
+    }
+}
+
+impl SyntheticConversationsParser {
+    /// The registered path: the archive's entries are already in memory as evidence, so a
+    /// declared file is stored (idempotently, by digest) and verified through the same code
+    /// as [`Self::parse_archive`] instead of being refused.
+    async fn execute_registered(
         &self,
-        input: ParserExecutionInput<'_>,
+        input: &ParserExecutionInput<'_>,
     ) -> Result<ParsedConversations, ParserExecutionError> {
         let evidence = |name: &str| -> Option<&[u8]> {
             input
@@ -93,21 +103,59 @@ impl ParserExecutor for SyntheticConversationsParser {
                 .map(|artifact| artifact.bytes.as_ref())
         };
         let conversations = evidence("conversations.json").ok_or(ParserExecutionError::Failed)?;
-        let mut parsed = decode::parse_archive(
+        let assets_json = evidence("assets.json");
+        let extracted = if assets_json.is_some() {
+            extract_entries(input).await?
+        } else {
+            Vec::new()
+        };
+        let selected = Self::registration().id;
+        self.parse_archive(&SyntheticArchiveInput::new(
+            &selected,
             conversations,
             evidence("projects.json"),
             evidence("canvas.json"),
-            Self::registration().id,
-        )
-        .map_err(|_| ParserExecutionError::Failed)?;
-        // Asset declarations require async BlobStore verification. Refuse them
-        // here instead of silently claiming that unverified bytes were imported.
-        if evidence("assets.json").is_some() {
-            return Err(ParserExecutionError::Failed);
-        }
-        parsed.assets.clear();
-        Ok(parsed)
+            assets_json,
+            &extracted,
+            input.blobs,
+        ))
+        .await
+        .map_err(|_| ParserExecutionError::Failed)
     }
+}
+
+/// Stores each entry of the archive by digest and returns the references a declared file is
+/// verified against. A blob store keyed by digest makes this the same object the importer
+/// registers later, so nothing new is retained.
+async fn extract_entries(
+    input: &ParserExecutionInput<'_>,
+) -> Result<Vec<ExtractedArtifact>, ParserExecutionError> {
+    let mut extracted = Vec::with_capacity(input.artifacts.len());
+    for artifact in input.artifacts {
+        let kind = input
+            .inventory
+            .entries
+            .iter()
+            .find(|entry| entry.path == artifact.path)
+            .map_or(EntryKind::Unknown, |entry| entry.kind);
+        let blob = input
+            .blobs
+            .store(
+                crate::archive::media_type(kind),
+                futures_util::stream::iter([Ok::<_, std::io::Error>(artifact.bytes.clone())]),
+            )
+            .await
+            .map_err(|_| ParserExecutionError::Failed)?;
+        extracted.push(ExtractedArtifact {
+            blob,
+            provenance: ArtifactProvenance {
+                raw_archive_digest: input.raw_archive.digest.hex.as_str().to_owned(),
+                entry_path: artifact.path.clone(),
+            },
+            quarantined: artifact.quarantined,
+        });
+    }
+    Ok(extracted)
 }
 
 impl SyntheticConversationsParser {

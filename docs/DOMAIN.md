@@ -20,3 +20,4 @@
 5. Normalized updates create revisions/history rather than rewriting evidence.
 6. Archive authority remains separate from Knowledge analysis.
 7. Consumer ingestion never depends on undocumented browser sessions.
+8. A completeness gap names something the export contains or references and the importer could not store or model (`unrecognized_record`, `missing_file`). The absence of an optional section is not a gap, so an export with conversations only is complete.

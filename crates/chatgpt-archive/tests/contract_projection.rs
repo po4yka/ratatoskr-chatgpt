@@ -22,9 +22,9 @@ use ratatoskr_ai_archive_contracts::{
 };
 use ratatoskr_chatgpt_archive::reparse::ReparseEngine;
 use ratatoskr_chatgpt_archive::{
-    AcquisitionMode, BlobStore, InitialImportWorker, ParsedConversations, ParserExecutionError,
-    ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration, ParserRegistry,
-    SYNTHETIC_PARSER_NAME, SyntheticConversationsParser,
+    AcquisitionMode, BlobStore, InitialImportWorker, ParserExecutionInput, ParserExecutor,
+    ParserFuture, ParserId, ParserRegistration, ParserRegistry, SYNTHETIC_PARSER_NAME,
+    SyntheticConversationsParser,
 };
 use ratatoskr_event_envelope::EventEnvelope;
 use uuid::Uuid;
@@ -257,22 +257,21 @@ struct NewerRelease {
 }
 
 impl ParserExecutor for NewerRelease {
-    fn execute(
-        &self,
-        input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
-        let mut parsed = SyntheticConversationsParser.execute(input)?;
-        parsed.parser = self.id.clone();
-        if let Some(text) = self.rewrite_first_message
-            && let Some(part) = parsed
-                .conversations
-                .first_mut()
-                .and_then(|conversation| conversation.messages.first_mut())
-                .and_then(|message| message.parts.first_mut())
-        {
-            part.payload = serde_json::Value::String(text.to_owned());
-        }
-        Ok(parsed)
+    fn execute<'a>(&'a self, input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move {
+            let mut parsed = SyntheticConversationsParser.execute(input).await?;
+            parsed.parser = self.id.clone();
+            if let Some(text) = self.rewrite_first_message
+                && let Some(part) = parsed
+                    .conversations
+                    .first_mut()
+                    .and_then(|conversation| conversation.messages.first_mut())
+                    .and_then(|message| message.parts.first_mut())
+            {
+                part.payload = serde_json::Value::String(text.to_owned());
+            }
+            Ok(parsed)
+        })
     }
 }
 
@@ -507,8 +506,9 @@ async fn a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial()
             .iter()
             .filter(|code| **code == "ai_archive.import.incomplete")
             .count(),
-        1,
-        "the synthetic export is also incomplete, so exactly one incomplete-import warning stays: {codes:?}"
+        0,
+        "the export itself is complete (XR-021 CONTRACTS.md R3-05), so the too-large warning is the \
+         only diagnostic: {codes:?}"
     );
     database.discard().await;
 }

@@ -12,7 +12,7 @@ use ratatoskr_chatgpt_archive::config::{Limits, StorageConfig};
 use ratatoskr_chatgpt_archive::reparse::{ReparseChangeKind, ReparseEngine};
 use ratatoskr_chatgpt_archive::{
     AcquisitionMode, ArchiveLimits, BlobStore, Database, ParsedConversation, ParsedConversations,
-    ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration,
+    ParserExecutionInput, ParserExecutor, ParserFuture, ParserId, ParserRegistration,
     ParserRegistry,
 };
 use secrecy::SecretString;
@@ -99,11 +99,8 @@ struct FixedParser {
 }
 
 impl ParserExecutor for FixedParser {
-    fn execute(
-        &self,
-        _input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
-        Ok(conversation(self.version))
+    fn execute<'a>(&'a self, _input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move { Ok(conversation(self.version)) })
     }
 }
 
@@ -111,13 +108,12 @@ impl ParserExecutor for FixedParser {
 struct OmittingParser;
 
 impl ParserExecutor for OmittingParser {
-    fn execute(
-        &self,
-        _input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
-        let mut parsed = conversation("2.0");
-        parsed.conversations.clear();
-        Ok(parsed)
+    fn execute<'a>(&'a self, _input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move {
+            let mut parsed = conversation("2.0");
+            parsed.conversations.clear();
+            Ok(parsed)
+        })
     }
 }
 

@@ -24,8 +24,8 @@
 
 ## 6. An import can be complete (R3-05)
 
-- [ ] 6.1 RED: `tests/synthetic_conversations_parser.rs`, `tests/archive_asset_evidence.rs` and `tests/import_state.rs` completeness tests fail for the three gaps and the refused `assets.json`.
-- [ ] 6.2 GREEN: remove the three gaps, verify `assets.json` through the blob store on the registered parser path, and update `docs/DOMAIN.md` and `README.md`.
+- [x] 6.1 RED: after a signature-only change (the executor returns a boxed future and its input carries the raw archive and the blob store, behaviour unchanged), `tests/import_state.rs` `an_export_with_only_conversations_is_complete`, `an_export_with_projects_canvas_and_verified_assets_is_complete` and `a_declared_asset_with_no_file_is_a_missing_file_gap` failed on the three `*_not_observed` gaps (and the refused `assets.json`), `an_unrecognized_record_is_still_a_gap` failed on the extra gaps, and `tests/archive_asset_evidence.rs` `an_assets_json_with_every_file_present_imports_the_assets` failed with the refusal; `a_malformed_assets_json_fails_permanently` and `a_malformed_assets_json_is_a_parser_failure` pin behaviour that already held. Running them showed that every mapping node repeating its own key as `id` was recorded as an unrecognized record, so no conversation could be complete: `tests/synthetic_conversations_parser.rs` `a_mapping_node_id_equal_to_its_key_is_not_an_unrecognized_record` was added and failed for that reason (`a_mapping_node_id_that_differs_from_its_key_is_preserved` pins the evidence that stays).
+- [x] 6.2 GREEN: remove the three gaps, run the registered parser through the same asset verification as `parse_archive` (the executor stores each entry by digest and verifies the declared files against the blob store), record a node `id` only when it differs from its mapping key, update `tests/receipt_repository_pg.rs` and `tests/contract_projection.rs` to the new truth (a complete export has no gap and no incomplete-import warning), and update `docs/DOMAIN.md` and `README.md`.
 
 ## 7. Deleting an archive keeps retained records announced (R3-06)
 

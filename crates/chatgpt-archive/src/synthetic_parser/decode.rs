@@ -169,7 +169,9 @@ fn parse_mapping(
 ) -> Option<ParsedMessage> {
     let path = child_path(mapping_path, key);
     record_extra(raw_records, &path, &input.extra);
-    if let Some(id) = input.id {
+    // The node repeats its mapping key; only an `id` that disagrees with the key is evidence the
+    // model does not hold (XR-021 CONTRACTS.md R3-05).
+    if let Some(id) = input.id.filter(|id| id != key) {
         raw_records.push(RawRecord {
             path: child_path(&path, "id"),
             payload: Value::String(id),

@@ -545,7 +545,7 @@ fn is_media(bytes: &[u8]) -> bool {
         || bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
 }
 
-fn media_type(kind: EntryKind) -> &'static str {
+pub(crate) fn media_type(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Json => "application/json",
         EntryKind::Html => "text/html",

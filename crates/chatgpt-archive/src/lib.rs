@@ -74,7 +74,8 @@ pub use owner::OwnerResolver;
 pub mod synthetic_parser;
 pub use parser_registry::{
     CompiledParser, ParserArtifactEvidence, ParserExecutionError, ParserExecutionInput,
-    ParserExecutor, ParserId, ParserRegistration, ParserRegistry, ParserSelection, RegistryError,
+    ParserExecutor, ParserFuture, ParserId, ParserRegistration, ParserRegistry, ParserSelection,
+    RegistryError,
 };
 pub use synthetic_parser::{
     AssetAnomaly, AssetAvailability, AssetKind, ContentPartKind, InstructionKind, MessageRole,

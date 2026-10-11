@@ -50,7 +50,7 @@ curl -X POST http://127.0.0.1:8096/exports \
 | `RATATOSKR__RECEIPT__LISTEN_ADDRESS` | The receipt listener Edge probes and forwards to. Default `127.0.0.1:8096`, loopback only, must differ from the operator address. Bound only while the database and staging root are configured. |
 | `RATATOSKR__ADMIN__LISTEN_ADDRESS` | The operator listener. Default `127.0.0.1:9085`. |
 | `RATATOSKR__STORAGE__DATABASE_URL`, `RATATOSKR__STORAGE__BLOB_ROOT`, `RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT` | PostgreSQL, the content-addressed blob root and the receipt staging directory. The blob root is required; the receipt route mounts only with the other two. |
-| `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` | `<platform user uuid>=<account external ref>`, comma separated. An account without a mapping emits no `ai_archive.*` fact, and a Platform receipt for an unmapped user is refused. |
+| `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` | `<platform user uuid>=<account external ref>`, comma separated. An account without a mapping emits no `ai_archive.*` fact, and a Platform receipt for an unmapped user is answered `403` with code `chatgpt.account.unmapped`. |
 | `RATATOSKR__RECEIPT__EVENT_BUS_URL` | The `nats://` or `tls://` endpoint that receives operation reports and `ai_archive.*` facts. Required when an account mapping is configured. |
 | `RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH` | Absolute path of the service identity's NKey seed, normally `/etc/ratatoskr/chatgpt.nkey`. Read at runtime and never logged. |
 | `RATATOSKR__RECEIPT__MAX_EVENT_BYTES` | Largest serialized `ai_archive.*` envelope the service enqueues. Default `8000000`, accepted `65536` through `8388608`. A larger fact is not enqueued and the import is reported `partially_succeeded` with the warning `ai_archive.facts.too_large`. The archive never truncates or splits a conversation. |
@@ -320,9 +320,7 @@ Local hard deletion is governed by an explicit Ratatoskr retention policy and ne
 
 ## Completeness reporting
 
-The current reconciliation boundary produces a structured in-memory report;
-the receipt pipeline does not yet persist it. A future fully evidenced report
-may look like:
+Every import persists a completeness report (`chatgpt_archive.completeness_reports`) with counts, gaps and a status, and the terminal operation report derives from it. A gap names something the export contains or references and the importer could not store or model: an `unrecognized_record` (a record the parser does not model; it stays in the raw archive) or a `missing_file` (a declared file with no verified bytes). The absence of an optional section (projects, canvas, assets) is not a gap, so an export with conversations only is `complete` and its operation `succeeded`; any gap makes it `structurally_partial` and the operation `partially_succeeded` with the `ai_archive.import.incomplete` warning. A fuller report than the one persisted today may look like:
 
 ```text
 Projects discovered:              19

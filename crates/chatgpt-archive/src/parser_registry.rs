@@ -5,9 +5,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use ratatoskr_identifiers::BlobRef;
 
 use crate::receipt::AcquisitionMode;
-use crate::{ArchiveInventory, ParsedConversations};
+use crate::{ArchiveInventory, BlobStore, ParsedConversations};
 
 /// Stable parser identity and release version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -36,7 +37,18 @@ pub struct ParserExecutionInput<'a> {
     pub inventory: &'a ArchiveInventory,
     /// Bounded, re-inspected entry evidence held only for this execution.
     pub artifacts: &'a [ParserArtifactEvidence],
+    /// The immutable raw archive the entries were read from.
+    pub raw_archive: &'a BlobRef,
+    /// The content-addressed store a parser verifies declared files against. Storing the bytes
+    /// of an archive entry here is idempotent: the same digest is the same object.
+    pub blobs: &'a BlobStore,
 }
+
+/// The result of one parser execution, resolved asynchronously because verifying declared files
+/// reads the blob store.
+pub type ParserFuture<'a> = std::pin::Pin<
+    Box<dyn Future<Output = Result<ParsedConversations, ParserExecutionError>> + Send + 'a>,
+>;
 
 /// One bounded archive entry made inert and available to a compiled parser.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,10 +76,7 @@ pub trait ParserExecutor: core::fmt::Debug + Send + Sync {
     /// # Errors
     ///
     /// Returns [`ParserExecutionError`] without embedding source content.
-    fn execute(
-        &self,
-        input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError>;
+    fn execute<'a>(&'a self, input: ParserExecutionInput<'a>) -> ParserFuture<'a>;
 }
 
 /// One exact compatible compiled parser resolved for operator execution.
@@ -84,10 +93,8 @@ impl CompiledParser {
     /// # Errors
     ///
     /// Returns the parser's content-free failure.
-    pub fn execute(
-        &self,
-        input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
+    #[must_use = "the parse runs only when the future is awaited"]
+    pub fn execute<'a>(&'a self, input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
         self.executor.execute(input)
     }
 }

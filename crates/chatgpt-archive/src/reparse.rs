@@ -263,10 +263,14 @@ impl ReparseEngine {
             .find_exact(&target_parser, &inventory, acquisition_mode)
             .ok_or(ReparseError::Conflict)?;
         let artifacts = read_artifacts(&self.blobs, &raw_ref, &inventory).await?;
-        let parsed = compiled.execute(ParserExecutionInput {
-            inventory: &inventory,
-            artifacts: &artifacts,
-        })?;
+        let parsed = compiled
+            .execute(ParserExecutionInput {
+                inventory: &inventory,
+                artifacts: &artifacts,
+                raw_archive: &raw_ref,
+                blobs: &self.blobs,
+            })
+            .await?;
         if parsed.parser != target_parser {
             return Err(ReparseError::Conflict);
         }

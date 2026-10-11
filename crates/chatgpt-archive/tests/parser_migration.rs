@@ -16,7 +16,7 @@ use ratatoskr_chatgpt_archive::parser_migration::{
 use ratatoskr_chatgpt_archive::reparse::ReparseEngine;
 use ratatoskr_chatgpt_archive::{
     AcquisitionMode, ArchiveLimits, BlobStore, Database, ParsedConversation, ParsedConversations,
-    ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration,
+    ParserExecutionInput, ParserExecutor, ParserFuture, ParserId, ParserRegistration,
     ParserRegistry,
 };
 use secrecy::SecretString;
@@ -79,28 +79,27 @@ fn entry(archive_id: Uuid, status: ParserMigrationEntryStatus) -> ParserMigratio
 struct MigrationParser;
 
 impl ParserExecutor for MigrationParser {
-    fn execute(
-        &self,
-        _input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
-        Ok(ParsedConversations {
-            schema_id: "chatgpt.synthetic.migration".to_owned(),
-            parser: ParserId {
-                name: "chatgpt-test".to_owned(),
-                version: "2.0".to_owned(),
-            },
-            conversations: vec![ParsedConversation {
-                external_id: "conversation-1".to_owned(),
-                title: None,
-                created_at_epoch_seconds: None,
-                updated_at_epoch_seconds: None,
-                provider_metadata: serde_json::json!({"shape":"2.0"}),
-                messages: Vec::new(),
-            }],
-            projects: Vec::new(),
-            canvas_documents: Vec::new(),
-            assets: Vec::new(),
-            raw_records: Vec::new(),
+    fn execute<'a>(&'a self, _input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move {
+            Ok(ParsedConversations {
+                schema_id: "chatgpt.synthetic.migration".to_owned(),
+                parser: ParserId {
+                    name: "chatgpt-test".to_owned(),
+                    version: "2.0".to_owned(),
+                },
+                conversations: vec![ParsedConversation {
+                    external_id: "conversation-1".to_owned(),
+                    title: None,
+                    created_at_epoch_seconds: None,
+                    updated_at_epoch_seconds: None,
+                    provider_metadata: serde_json::json!({"shape":"2.0"}),
+                    messages: Vec::new(),
+                }],
+                projects: Vec::new(),
+                canvas_documents: Vec::new(),
+                assets: Vec::new(),
+                raw_records: Vec::new(),
+            })
         })
     }
 }

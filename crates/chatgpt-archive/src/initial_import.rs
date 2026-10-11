@@ -163,10 +163,14 @@ impl InitialImportWorker {
             .find_exact(&selected, &inventory, acquisition)
             .ok_or(ReparseError::Conflict)?;
         let artifacts = read_artifacts(&self.blobs, &raw, &inventory).await?;
-        let parsed = parser.execute(ParserExecutionInput {
-            inventory: &inventory,
-            artifacts: &artifacts,
-        })?;
+        let parsed = parser
+            .execute(ParserExecutionInput {
+                inventory: &inventory,
+                artifacts: &artifacts,
+                raw_archive: &raw,
+                blobs: &self.blobs,
+            })
+            .await?;
         if parsed.parser != selected {
             return Err(ReparseError::Conflict);
         }
@@ -445,6 +449,10 @@ async fn enqueue_failed_reports(
 
 /// The named holes of an import, one entry per kind, so that an incomplete import
 /// always says what is missing (contract invariant A1).
+///
+/// A gap names something the export contains or references and the importer could not store
+/// or model. The absence of an optional section (projects, canvas, assets) is not a gap
+/// (XR-021 CONTRACTS.md R3-05).
 fn import_gaps(parsed: &ParsedConversations) -> Result<Vec<AiGap>, ReparseError> {
     let unavailable_assets = parsed
         .assets
@@ -464,24 +472,6 @@ fn import_gaps(parsed: &ParsedConversations) -> Result<Vec<AiGap>, ReparseError>
             "missing_file",
             "Referenced files were not available as verified bytes.",
             Some(unavailable_assets),
-        ),
-        (
-            parsed.projects.is_empty(),
-            "projects_not_observed",
-            "The export contained no projects.",
-            None,
-        ),
-        (
-            parsed.canvas_documents.is_empty(),
-            "canvas_not_observed",
-            "The export contained no canvas documents.",
-            None,
-        ),
-        (
-            parsed.assets.is_empty(),
-            "assets_not_observed",
-            "The export contained no file or generated-asset references.",
-            None,
         ),
     ] {
         if present {

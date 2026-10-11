@@ -1,9 +1,9 @@
 //! Parser registry selection matrix.
 
 use ratatoskr_chatgpt_archive::{
-    AcquisitionMode, ArchiveInventory, ParsedConversations, ParserExecutionError,
-    ParserExecutionInput, ParserExecutor, ParserId, ParserRegistration, ParserRegistry,
-    ParserSelection, RegistryError,
+    AcquisitionMode, ArchiveInventory, BlobStore, ParsedConversations, ParserExecutionInput,
+    ParserExecutor, ParserFuture, ParserId, ParserRegistration, ParserRegistry, ParserSelection,
+    RegistryError,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -37,21 +37,20 @@ fn versioned_parser(version: &str) -> ParserRegistration {
 struct EmptyParser;
 
 impl ParserExecutor for EmptyParser {
-    fn execute(
-        &self,
-        _input: ParserExecutionInput<'_>,
-    ) -> Result<ParsedConversations, ParserExecutionError> {
-        Ok(ParsedConversations {
-            schema_id: "synthetic.chatgpt.test".to_owned(),
-            parser: ParserId {
-                name: "chatgpt".to_owned(),
-                version: "1.10".to_owned(),
-            },
-            conversations: Vec::new(),
-            projects: Vec::new(),
-            canvas_documents: Vec::new(),
-            assets: Vec::new(),
-            raw_records: Vec::new(),
+    fn execute<'a>(&'a self, _input: ParserExecutionInput<'a>) -> ParserFuture<'a> {
+        Box::pin(async move {
+            Ok(ParsedConversations {
+                schema_id: "synthetic.chatgpt.test".to_owned(),
+                parser: ParserId {
+                    name: "chatgpt".to_owned(),
+                    version: "1.10".to_owned(),
+                },
+                conversations: Vec::new(),
+                projects: Vec::new(),
+                canvas_documents: Vec::new(),
+                assets: Vec::new(),
+                raw_records: Vec::new(),
+            })
         })
     }
 }
@@ -94,8 +93,8 @@ fn duplicate_identity_is_refused() {
     ));
 }
 
-#[test]
-fn compatible_versions_and_exact_lookup_are_deterministic() {
+#[tokio::test]
+async fn compatible_versions_and_exact_lookup_are_deterministic() {
     let mut forward = ParserRegistry::default();
     let mut reverse = ParserRegistry::default();
     for version in ["1.2", "1.10", "2.0"] {
@@ -129,11 +128,25 @@ fn compatible_versions_and_exact_lookup_are_deterministic() {
                 AcquisitionMode::ConsumerExport,
             )
             .expect("exact compatible compiled parser resolves");
+        let root = tempfile::tempdir().expect("blob root");
+        let blobs = BlobStore::new(root.path()).expect("blob store");
+        let raw = blobs
+            .store(
+                "application/zip",
+                futures_util::stream::iter([Ok::<bytes::Bytes, std::io::Error>(
+                    bytes::Bytes::from_static(b"raw"),
+                )]),
+            )
+            .await
+            .expect("a raw reference");
         let parsed = exact
             .execute(ParserExecutionInput {
                 inventory: &inventory(),
                 artifacts: &[],
+                raw_archive: &raw,
+                blobs: &blobs,
             })
+            .await
             .expect("compiled parser executes");
         assert_eq!(parsed.parser.version, "1.10");
         assert!(matches!(

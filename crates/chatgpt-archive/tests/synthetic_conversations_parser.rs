@@ -106,3 +106,71 @@ async fn unknown_fields_and_parts_remain_losslessly_available() {
             && record.payload == serde_json::json!(["preserve"])
     }));
 }
+
+/// A mapping node repeats its own key as `id`. That is modeled, not unrecognized, so it must not
+/// turn every conversation into a gap (XR-021 CONTRACTS.md R3-05); an `id` that disagrees with
+/// the key is evidence and stays.
+async fn parse_document(
+    document: &serde_json::Value,
+) -> ratatoskr_chatgpt_archive::ParsedConversations {
+    let root = tempfile::tempdir().expect("temporary blob root");
+    let store = BlobStore::new(root.path()).expect("blob store");
+    let artifacts = Vec::new();
+    let selected = selected_parser();
+    let bytes = document.to_string();
+    let input = SyntheticArchiveInput::new(
+        &selected,
+        bytes.as_bytes(),
+        None,
+        None,
+        None,
+        &artifacts,
+        &store,
+    );
+    SyntheticConversationsParser
+        .parse_archive(&input)
+        .await
+        .expect("the document parses")
+}
+
+fn single_node(key: &str, id: &str) -> serde_json::Value {
+    serde_json::json!([{
+        "id": "conversation-1",
+        "mapping": {
+            key: {
+                "id": id,
+                "parent": null,
+                "message": {
+                    "id": "message-1",
+                    "author": { "role": "user" },
+                    "content": { "parts": ["Hello"] }
+                }
+            }
+        }
+    }])
+}
+
+#[tokio::test]
+async fn a_mapping_node_id_equal_to_its_key_is_not_an_unrecognized_record() {
+    let parsed = parse_document(&single_node("node-1", "node-1")).await;
+
+    assert!(
+        parsed.raw_records.is_empty(),
+        "nothing unmodeled: {:?}",
+        parsed.raw_records
+    );
+}
+
+#[tokio::test]
+async fn a_mapping_node_id_that_differs_from_its_key_is_preserved() {
+    let parsed = parse_document(&single_node("node-1", "node-other")).await;
+
+    assert!(
+        parsed
+            .raw_records
+            .iter()
+            .any(|record| record.path == "/0/mapping/node-1/id"),
+        "{:?}",
+        parsed.raw_records
+    );
+}
