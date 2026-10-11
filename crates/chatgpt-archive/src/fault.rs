@@ -39,6 +39,15 @@ pub fn reject(kind: FailureKind) -> Response {
     render_error_envelope(&ArchiveError::Rejected(kind))
 }
 
+/// Refuse a request with a named failure: log the closed class once at the boundary, then
+/// render it through the single construction site.
+#[must_use]
+pub fn refuse(kind: FailureKind) -> Response {
+    let boundary = ArchiveError::Rejected(kind);
+    boundary.log();
+    render_error_envelope(&boundary)
+}
+
 /// The layer every served router applies: a panicking handler becomes a
 /// plain-text 500 instead of a dropped connection or a leaked payload.
 #[must_use]

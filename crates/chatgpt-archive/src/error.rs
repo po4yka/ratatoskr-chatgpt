@@ -76,11 +76,9 @@ impl ArchiveError {
                     "internal failure"
                 );
             }
-            Self::Rejected(kind) if kind.fault().status.is_server_error() => {
-                tracing::warn!(kind = %kind, code, status, "request rejected");
-            }
             Self::Rejected(kind) => {
-                tracing::info!(kind = %kind, code, status, "request rejected");
+                // The class is a closed vocabulary; the line carries nothing the request held.
+                tracing::warn!(class = kind.class(), code, status, "request rejected");
             }
         }
     }
@@ -151,6 +149,10 @@ pub enum FailureKind {
     Unauthenticated,
     /// The resource does not exist, or exists and is not this principal's.
     NotFound,
+    /// The credential or claims are well formed and name a principal this deployment does not
+    /// set up for archive import. Distinct from [`Self::Unauthenticated`] on purpose: a caller
+    /// that treats 401 as a rejected device credential must never see this case as one.
+    AccountUnmapped,
     /// The request body is not what the route accepts.
     InvalidRequest,
     /// The declared or received archive size exceeds the accepted maximum.
@@ -160,9 +162,10 @@ pub enum FailureKind {
 impl FailureKind {
     /// Every kind, in status order. The array length is the documented count,
     /// so adding a variant without updating it does not compile.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::InvalidRequest,
         Self::Unauthenticated,
+        Self::AccountUnmapped,
         Self::NotFound,
         Self::PayloadTooLarge,
         Self::RouteNotFound,
@@ -176,9 +179,28 @@ impl FailureKind {
             Self::RouteNotFound => &ROUTE_NOT_FOUND,
             Self::MethodNotAllowed => &METHOD_NOT_ALLOWED,
             Self::Unauthenticated => &UNAUTHENTICATED,
+            Self::AccountUnmapped => &ACCOUNT_UNMAPPED,
             Self::NotFound => &NOT_FOUND,
             Self::PayloadTooLarge => &PAYLOAD_TOO_LARGE,
             Self::InvalidRequest => &INVALID_REQUEST,
+        }
+    }
+}
+
+impl FailureKind {
+    /// The closed log class of this refusal (XR-021 CONTRACTS.md R3-07 rule 2). It names the
+    /// kind of refusal and nothing the request carried, so an operator can tell a deployment
+    /// mistake from a client mistake without a header value, a path or a body byte.
+    #[must_use]
+    pub const fn class(self) -> &'static str {
+        match self {
+            Self::RouteNotFound => "route_not_found",
+            Self::MethodNotAllowed => "method_not_allowed",
+            Self::Unauthenticated => "unauthenticated",
+            Self::AccountUnmapped => "unmapped_account",
+            Self::NotFound => "not_found",
+            Self::InvalidRequest => "invalid_request",
+            Self::PayloadTooLarge => "payload_too_large",
         }
     }
 }
@@ -253,6 +275,17 @@ static UNAUTHENTICATED: LazyLock<PublicFault> = LazyLock::new(|| {
         StatusCode::UNAUTHORIZED,
         "chatgpt.auth.unauthenticated",
         "Authentication is required.",
+        false,
+    )
+});
+
+/// `chatgpt.account.unmapped` — 403. The Platform user is authenticated and unknown to this
+/// deployment's account mapping; repeating the request cannot help until an operator maps it.
+static ACCOUNT_UNMAPPED: LazyLock<PublicFault> = LazyLock::new(|| {
+    entry(
+        StatusCode::FORBIDDEN,
+        "chatgpt.account.unmapped",
+        "This user is not set up for archive import.",
         false,
     )
 });

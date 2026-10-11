@@ -141,13 +141,17 @@ pub fn router(state: Arc<ReceiptApiState>) -> Router {
 
 /// The capability document: it needs no header and no claim because it carries no
 /// tenant data.
-async fn capabilities() -> Json<serde_json::Value> {
-    Json(receipt_capability_document("chatgpt"))
+async fn capabilities() -> Response {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(receipt_capability_document("chatgpt")),
+    )
+        .into_response()
 }
 
 /// A method the route does not accept, rendered through the single envelope site.
 async fn method_not_allowed() -> Response {
-    crate::fault::reject(FailureKind::MethodNotAllowed)
+    crate::fault::refuse(FailureKind::MethodNotAllowed)
 }
 
 /// The trusted, loopback-only receipt Platform calls after device authentication.
@@ -157,19 +161,19 @@ async fn receive_platform_archive(
     body: Body,
 ) -> Response {
     if headers.contains_key(axum::http::header::AUTHORIZATION) {
-        return crate::fault::reject(FailureKind::Unauthenticated);
+        return crate::fault::refuse(FailureKind::Unauthenticated);
     }
-    let Some((principal, expected_sha256, expected_size, operation)) =
-        platform_claims(&state, &headers)
-    else {
-        return crate::fault::reject(FailureKind::Unauthenticated);
-    };
+    let (principal, expected_sha256, expected_size, operation) =
+        match platform_claims(&state, &headers) {
+            Ok(claims) => claims,
+            Err(kind) => return crate::fault::refuse(kind),
+        };
     // XR-021 CONTRACTS.md R2-15 and S06 D1: the literal value, no parameters, no other case.
     let media_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .map(axum::http::HeaderValue::as_bytes);
     if media_type != Some(ARCHIVE_MEDIA_TYPE.as_bytes()) {
-        return crate::fault::reject(FailureKind::InvalidRequest);
+        return crate::fault::refuse(FailureKind::InvalidRequest);
     }
     let stream = http_body_util::BodyStream::new(body).map_ok(|frame| match frame.into_data() {
         Ok(data) => data,
@@ -194,10 +198,38 @@ async fn receive_platform_archive(
     }
 }
 
+/// Reads the Edge-minted claims. A missing or malformed claim set is
+/// [`FailureKind::Unauthenticated`]; a well-formed claim set whose Platform user this
+/// deployment does not map is [`FailureKind::AccountUnmapped`] (XR-021 CONTRACTS.md R3-03).
 fn platform_claims(
     state: &ReceiptApiState,
     headers: &axum::http::HeaderMap,
-) -> Option<(TenantPrincipal, String, u64, PlatformOperation)> {
+) -> Result<(TenantPrincipal, String, u64, PlatformOperation), FailureKind> {
+    let claims = parse_platform_claims(headers).ok_or(FailureKind::Unauthenticated)?;
+    let principal = state
+        .platform_accounts
+        .get(&claims.user_id)
+        .cloned()
+        .ok_or(FailureKind::AccountUnmapped)?;
+    Ok((
+        principal,
+        claims.sha256,
+        claims.byte_size,
+        PlatformOperation {
+            operation_id: claims.operation_id,
+        },
+    ))
+}
+
+/// The well-formed claims of one Platform receipt.
+struct PlatformClaims {
+    user_id: uuid::Uuid,
+    operation_id: uuid::Uuid,
+    sha256: String,
+    byte_size: u64,
+}
+
+fn parse_platform_claims(headers: &axum::http::HeaderMap) -> Option<PlatformClaims> {
     let parse = |name: &'static str| headers.get(name)?.to_str().ok();
     let user_id = parse(HEADER_USER_ID)?.parse::<uuid::Uuid>().ok()?;
     let _device_id = parse(HEADER_DEVICE_ID)?.parse::<uuid::Uuid>().ok()?;
@@ -215,18 +247,12 @@ fn platform_claims(
     {
         return None;
     }
-    state
-        .platform_accounts
-        .get(&user_id)
-        .cloned()
-        .map(|principal| {
-            (
-                principal,
-                sha256.to_owned(),
-                byte_size,
-                PlatformOperation { operation_id },
-            )
-        })
+    Some(PlatformClaims {
+        user_id,
+        operation_id,
+        sha256: sha256.to_owned(),
+        byte_size,
+    })
 }
 
 /// The one place a receipt failure becomes an HTTP response.
@@ -247,9 +273,7 @@ fn respond(error: ReceiptError) -> Response {
             return internal_envelope(other);
         }
     };
-    let boundary = ArchiveError::Rejected(kind);
-    boundary.log();
-    crate::fault::render_error_envelope(&boundary)
+    crate::fault::refuse(kind)
 }
 
 /// Logs one internal receipt failure at the boundary and renders the static
@@ -273,26 +297,24 @@ async fn create_export(
         .and_then(|value| value.to_str().ok());
     let Ok(principal) = state.authenticator.authenticate(credential) else {
         // One refusal for every authentication failure reason.
-        let boundary = ArchiveError::Rejected(FailureKind::Unauthenticated);
-        boundary.log();
-        return crate::fault::render_error_envelope(&boundary);
+        return crate::fault::refuse(FailureKind::Unauthenticated);
     };
 
     let Some(mode_value) = headers
         .get(HEADER_ACQUISITION)
         .and_then(|v| v.to_str().ok())
     else {
-        return crate::fault::reject(FailureKind::InvalidRequest);
+        return crate::fault::refuse(FailureKind::InvalidRequest);
     };
     let Some(mode) = AcquisitionMode::parse(mode_value) else {
-        return crate::fault::reject(FailureKind::InvalidRequest);
+        return crate::fault::refuse(FailureKind::InvalidRequest);
     };
 
     let Some(media_type) = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
     else {
-        return crate::fault::reject(FailureKind::InvalidRequest);
+        return crate::fault::refuse(FailureKind::InvalidRequest);
     };
 
     let declared_length = match headers
@@ -301,7 +323,7 @@ async fn create_export(
     {
         Some(raw) => match raw.parse::<u64>() {
             Ok(length) => Some(length),
-            Err(_) => return crate::fault::reject(FailureKind::InvalidRequest),
+            Err(_) => return crate::fault::refuse(FailureKind::InvalidRequest),
         },
         None => None,
     };

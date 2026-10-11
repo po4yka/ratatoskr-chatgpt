@@ -554,8 +554,16 @@ async fn missing_acquisition_or_media_type_answer_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "unknown acquisition value");
 }
 
+/// The Platform user the fixture maps to an account.
+const MAPPED_USER: &str = "00000000-0000-0000-0000-000000000011";
+
 /// A Platform receipt for `GOOD_BODY` carrying every claim, with the `Content-Type` under test.
 fn platform_request(media_type: Option<&str>) -> Request<Body> {
+    platform_request_for(media_type, MAPPED_USER)
+}
+
+/// Like [`platform_request`], for the Platform user claim under test.
+fn platform_request_for(media_type: Option<&str>, user: &str) -> Request<Body> {
     let total: u64 = GOOD_BODY.iter().map(|chunk| chunk.len() as u64).sum();
     let mut request = request_at(
         ratatoskr_ai_archive_contracts::platform_receipt::RECEIPT_PATH,
@@ -567,10 +575,7 @@ fn platform_request(media_type: Option<&str>) -> Request<Body> {
         byte_stream(GOOD_BODY.to_vec()),
     );
     for (name, value) in [
-        (
-            "x-ratatoskr-user-id",
-            "00000000-0000-0000-0000-000000000011",
-        ),
+        ("x-ratatoskr-user-id", user),
         (
             "x-ratatoskr-device-id",
             "00000000-0000-0000-0000-000000000012",
@@ -645,4 +650,244 @@ async fn tenant_token_receipt_keeps_its_media_type_rule() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+// ---- XR-021 CONTRACTS.md R3-03 rule 3 and R3-07 rules 2 and 3 ----
+
+/// The Platform user is well-formed but not in the account mapping: the deployment does not set
+/// this user up, which Platform must not mistake for a rejected device credential.
+#[tokio::test]
+async fn an_unmapped_platform_user_is_forbidden_not_unauthenticated() {
+    let fixture = fixture(u64::MAX);
+    let (status, json) = send(
+        &fixture.app,
+        platform_request_for(
+            Some("application/zip"),
+            "00000000-0000-0000-0000-0000000000ff",
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let envelope: ratatoskr_error_contracts::ErrorEnvelope =
+        serde_json::from_value(json).expect("the 403 body is a parsable ErrorEnvelope");
+    assert_eq!(envelope.code.as_str(), "chatgpt.account.unmapped");
+    assert!(!envelope.retryable);
+    assert_eq!(
+        envelope.message.as_str(),
+        "This user is not set up for archive import."
+    );
+    assert!(fixture.repository.exports_snapshot().is_empty());
+}
+
+/// A claim that is not a UUID is a malformed claim set, not an unmapped user.
+#[tokio::test]
+async fn malformed_claims_stay_unauthenticated() {
+    for user in ["not-a-uuid", ""] {
+        let fixture = fixture(u64::MAX);
+        let (status, json) = send(
+            &fixture.app,
+            platform_request_for(Some("application/zip"), user),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "user claim {user:?}");
+        assert_eq!(json["code"], "chatgpt.auth.unauthenticated");
+    }
+}
+
+#[tokio::test]
+async fn an_authorization_header_stays_unauthenticated() {
+    let fixture = fixture(u64::MAX);
+    let mut request = platform_request(Some("application/zip"));
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer tok-alpha".parse().expect("authorization header"),
+    );
+
+    let (status, json) = send(&fixture.app, request).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["code"], "chatgpt.auth.unauthenticated");
+}
+
+/// Claude sends the header on the same document; one test per receiver pins the equal value.
+#[tokio::test]
+async fn capabilities_carry_no_store() {
+    let fixture = fixture(u64::MAX);
+    let request = Request::builder()
+        .method("GET")
+        .uri(ratatoskr_ai_archive_contracts::platform_receipt::CAPABILITIES_PATH)
+        .body(Body::empty())
+        .expect("request builds");
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("infallible service");
+
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .map(axum::http::HeaderValue::as_bytes),
+        Some(&b"no-store"[..])
+    );
+}
+
+/// Log lines, keyed by the thread that emitted them.
+///
+/// A scoped subscriber would race with the other tests of this binary for the tracing callsite
+/// cache, so one global subscriber routes each event to the buffer of the emitting thread. A
+/// `#[tokio::test]` runs its whole request on its own thread, so a test reads exactly its own
+/// lines.
+#[derive(Clone, Default)]
+struct ThreadLogs(Arc<std::sync::Mutex<std::collections::HashMap<std::thread::ThreadId, Vec<u8>>>>);
+
+struct ThreadLogWriter(ThreadLogs);
+
+impl std::io::Write for ThreadLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (self.0)
+            .0
+            .lock()
+            .expect("log buffer")
+            .entry(std::thread::current().id())
+            .or_default()
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLogs {
+    type Writer = ThreadLogWriter;
+
+    fn make_writer(&'a self) -> ThreadLogWriter {
+        ThreadLogWriter(self.clone())
+    }
+}
+
+impl ThreadLogs {
+    /// The one capture of this binary, installed as the global subscriber on first use.
+    fn install() -> &'static Self {
+        static LOGS: std::sync::OnceLock<ThreadLogs> = std::sync::OnceLock::new();
+        LOGS.get_or_init(|| {
+            let logs = ThreadLogs::default();
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(logs.clone())
+                    .with_ansi(false)
+                    .finish(),
+            )
+            .expect("this binary installs one global subscriber");
+            logs
+        })
+    }
+
+    /// Returns and clears the lines the current thread has emitted.
+    fn take_lines(&self) -> Vec<String> {
+        let bytes = self
+            .0
+            .lock()
+            .expect("log buffer")
+            .remove(&std::thread::current().id())
+            .unwrap_or_default();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// An operator reads the log to learn why an import never started, so every refused Platform
+/// receipt leaves exactly one WARN line with a closed class, and nothing the request carried.
+#[tokio::test]
+async fn every_refused_platform_receipt_is_logged_with_a_class() {
+    let unmapped = "00000000-0000-0000-0000-0000000000ff";
+    let mut with_authorization = platform_request(Some("application/zip"));
+    with_authorization.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        "Bearer tok-alpha".parse().expect("authorization header"),
+    );
+    let refusals: Vec<(&str, u64, Request<Body>, StatusCode, &str)> = vec![
+        (
+            "invalid_request",
+            u64::MAX,
+            platform_request(Some("application/octet-stream")),
+            StatusCode::BAD_REQUEST,
+            "wrong media type",
+        ),
+        (
+            "unauthenticated",
+            u64::MAX,
+            with_authorization,
+            StatusCode::UNAUTHORIZED,
+            "authorization header",
+        ),
+        (
+            "unmapped_account",
+            u64::MAX,
+            platform_request_for(Some("application/zip"), unmapped),
+            StatusCode::FORBIDDEN,
+            "unmapped user",
+        ),
+        (
+            "method_not_allowed",
+            u64::MAX,
+            request_at(
+                ratatoskr_ai_archive_contracts::platform_receipt::RECEIPT_PATH,
+                "PUT",
+                None,
+                None,
+                Some("application/zip"),
+                None,
+                Body::empty(),
+            ),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "wrong method",
+        ),
+        (
+            "payload_too_large",
+            4,
+            platform_request(Some("application/zip")),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "declared size over the ceiling",
+        ),
+    ];
+    let logs = ThreadLogs::install();
+    logs.take_lines();
+    for (class, ceiling, request, expected, label) in refusals {
+        let fixture = fixture(ceiling);
+
+        let (status, _) = send(&fixture.app, request).await;
+
+        assert_eq!(status, expected, "{label}");
+        let lines = logs.take_lines();
+        assert_eq!(lines.len(), 1, "{label}: one log line, got {lines:?}");
+        let line = lines.first().expect("one line");
+        assert!(line.contains("WARN"), "{label}: {line}");
+        assert!(
+            line.contains(&format!("class=\"{class}\"")),
+            "{label}: {line}"
+        );
+        for secret in [
+            MAPPED_USER,
+            unmapped,
+            "00000000-0000-0000-0000-000000000014",
+            "1d99fb3667bdf788ccfcc99afe73c8ee02480e5aa3afecf3403c85eec47b84db",
+            "tok-alpha",
+            "an-archive-",
+            "/v1/ai-archives/receipt",
+        ] {
+            assert!(
+                !line.contains(secret),
+                "{label}: the log line carries request data: {line}"
+            );
+        }
+    }
 }

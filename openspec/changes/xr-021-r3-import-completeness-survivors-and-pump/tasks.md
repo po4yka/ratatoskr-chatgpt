@@ -14,8 +14,8 @@
 
 ## 4. Unmapped user is 403, refusals are logged (R3-03 rule 3, R3-07 rules 2 and 3)
 
-- [ ] 4.1 RED: `tests/receipt_http.rs` `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `capabilities_carry_no_store` and `every_refused_platform_receipt_is_logged_with_a_class` fail; `malformed_claims_stay_unauthenticated` and `an_authorization_header_stays_unauthenticated` pin behaviour that already held.
-- [ ] 4.2 GREEN: `FailureKind::AccountUnmapped`, logging for every refusal of the Platform receipt, and the `cache-control` header on the capability response.
+- [x] 4.1 RED: `tests/receipt_http.rs` `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `capabilities_carry_no_store` and `every_refused_platform_receipt_is_logged_with_a_class` fail; `malformed_claims_stay_unauthenticated` and `an_authorization_header_stays_unauthenticated` pin behaviour that already held. A scoped tracing subscriber raced with the other tests of the binary for the callsite cache, so the log test uses one global subscriber that routes events by emitting thread.
+- [x] 4.2 GREEN: `FailureKind::AccountUnmapped`, logging for every refusal of the Platform receipt, and the `cache-control` header on the capability response.
 
 ## 5. A duplicate of a failed import is reported, a failed import is logged (R3-04 rule 2, R3-07 rule 2)
 
