@@ -12,6 +12,7 @@ use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::blob_protocol::{HeldBytes, Registration, register_blobs};
 use crate::contract_projection::{FactScope, HeadPolicy, ProjectionError, project_import_facts};
 use crate::normalized_persist::{
     persist_conversation_detail, persist_projects, project_of_conversation,
@@ -133,6 +134,19 @@ pub enum ReparseError {
     /// The archive facts of the persisted rows could not be projected.
     #[error("archive fact projection failed")]
     Projection(#[from] ProjectionError),
+    /// An extracted artifact's blob was erased concurrently and could not be stored again. A
+    /// retryable class: nothing was registered (XR-021 CONTRACTS.md R2-07).
+    #[error("an extracted artifact's blob is missing and could not be restored")]
+    BlobUnavailable,
+}
+
+impl From<crate::blob_protocol::RegistrationError> for ReparseError {
+    fn from(error: crate::blob_protocol::RegistrationError) -> Self {
+        match error {
+            crate::blob_protocol::RegistrationError::Database(error) => Self::Store(error),
+            crate::blob_protocol::RegistrationError::Unavailable => Self::BlobUnavailable,
+        }
+    }
 }
 
 /// Plans and applies exact parser replay over one retained raw archive.
@@ -352,7 +366,7 @@ impl ReparseEngine {
         .bind(serde_json::to_value(&plan.report)?)
         .execute(&mut *transaction)
         .await?;
-        persist_artifacts(&mut transaction, plan, &stored_artifacts).await?;
+        persist_artifacts(&mut transaction, &self.blobs, plan, &stored_artifacts).await?;
         persist_projection(&mut transaction, plan).await?;
         // A reparse announces only what changed: identical content adds no row.
         project_import_facts(
@@ -606,9 +620,22 @@ fn parser_fingerprint(parsers: &[ParserId]) -> String {
 
 pub(crate) async fn persist_artifacts(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    blobs: &BlobStore,
     plan: &ReparsePlan,
     references: &[BlobRef],
 ) -> Result<(), ReparseError> {
+    // Before the first referencing row: lock each digest, prove its object present, and store
+    // it again from the bytes the plan still holds if an eraser removed it (XR-021
+    // CONTRACTS.md R2-07).
+    let registrations: Vec<Registration<'_>> = references
+        .iter()
+        .zip(&plan.artifacts)
+        .map(|(reference, artifact)| Registration {
+            reference,
+            held: HeldBytes::Memory(&artifact.bytes),
+        })
+        .collect();
+    register_blobs(transaction, blobs, &registrations).await?;
     for (ordinal, reference) in references.iter().enumerate() {
         let ordinal = i32::try_from(ordinal).map_err(|_| ReparseError::Conflict)?;
         sqlx::query(

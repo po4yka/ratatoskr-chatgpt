@@ -465,6 +465,7 @@ impl ArchiveReceiver {
                 sha256_hex: context.sha256_hex.clone(),
                 byte_length: context.byte_length,
                 platform_operation,
+                staged_path: staging_path.to_path_buf(),
             })
             .await
         {

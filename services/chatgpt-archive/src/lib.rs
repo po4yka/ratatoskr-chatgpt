@@ -710,7 +710,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
         }
 
         if let Some(staging_root) = config.storage.receipt_staging_root.clone() {
-            let repository = PostgresReceiptRepository::new(database.pool().clone());
+            let repository = PostgresReceiptRepository::new(database.pool().clone(), blob.clone());
             let receiver = ArchiveReceiver::new(
                 blob.clone(),
                 Arc::new(repository),

@@ -49,6 +49,10 @@ pub struct PublishRequest {
     pub byte_length: u64,
     /// The Platform operation to report, if this was a Platform receipt.
     pub platform_operation: Option<PlatformOperation>,
+    /// The staging file that still holds the archive bytes. The registering transaction
+    /// restores the blob from it when a concurrent erasure removed the object between the
+    /// store and the registration.
+    pub staged_path: std::path::PathBuf,
 }
 
 /// Why a persistence operation failed.
@@ -62,6 +66,11 @@ pub enum RepositoryError {
     /// update; the caller must reload before deciding anything.
     #[error("the import run changed state concurrently")]
     Conflict,
+    /// The blob the export would reference is gone and cannot be restored. A retryable
+    /// class: nothing was registered, and the next attempt stores the bytes again from
+    /// the source (XR-021 CONTRACTS.md R2-07).
+    #[error("the blob the export references is missing and could not be restored")]
+    BlobUnavailable,
     /// The digest already exists for the tenant; the export row predates
     /// this attempt.
     #[error("an export with this digest already exists for this tenant")]

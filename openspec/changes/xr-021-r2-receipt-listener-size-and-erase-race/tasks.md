@@ -19,8 +19,8 @@
 
 ## 5. Blob lock protocol (R2-07)
 
-- [ ] 5.1 RED: `crates/chatgpt-archive/tests/privacy_deletion_closure.rs` `a_concurrent_import_of_identical_bytes_never_leaves_a_dangling_reference` fails in interleaving (a) with a committed row that references a missing blob.
-- [ ] 5.2 GREEN: `blob_lock`, the eraser holding it for re-check and erase, every registrar taking it before the first referencing row and verifying presence, and the protocol replacing the residual-risk comment.
+- [x] 5.1 RED: `crates/chatgpt-archive/tests/privacy_deletion_closure.rs` `a_concurrent_import_of_identical_bytes_never_leaves_a_dangling_reference` (interleaving a) and `an_import_restores_an_artifact_blob_a_concurrent_eraser_removes` fail with a committed row that references a missing blob; `a_registration_that_cannot_restore_the_blob_fails_and_registers_nothing` (interleaving c) fails because the registration succeeds instead of failing with `BlobUnavailable`. `a_registration_that_commits_first_keeps_the_blob_for_the_eraser` (interleaving b) pins behaviour that already held, so it passed in the RED run. The erase gate seam, the `PublishRequest.staged_path` field and the `BlobUnavailable` variant were added first as signature-only scaffolding.
+- [x] 5.2 GREEN: `blob_lock`, the eraser holding it for re-check and erase, every registrar taking it before the first referencing row and verifying presence, and the protocol replacing the residual-risk comment.
 
 ## 6. Operator example and variable names (R2-10)
 

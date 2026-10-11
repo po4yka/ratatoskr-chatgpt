@@ -1,10 +1,12 @@
 //! Tenant-authorized, inventory-first privacy deletion.
 
 mod execution;
+mod gate;
 mod model;
 mod rows;
 pub(crate) mod service;
 
+pub use gate::EraseGate;
 pub use model::{
     DeletionAction, DeletionInventoryItem, DeletionPlan, DeletionReport, DeletionStatus,
     PrivacyDeletionScope,

@@ -39,6 +39,7 @@ pub use fault::render_error_envelope;
 
 pub mod admin;
 
+mod blob_protocol;
 pub mod blob_store;
 
 pub use blob_store::{BlobStore, BlobStoreError};

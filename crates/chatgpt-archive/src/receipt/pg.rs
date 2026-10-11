@@ -15,18 +15,23 @@ use super::repository::{
     PublishRequest, PublishedExport, ReceiptRepository, RepoFuture, RepositoryError, RunRecord,
 };
 use super::state::ImportState;
+use crate::BlobStore;
+use crate::blob_protocol::{HeldBytes, Registration, RegistrationError, register_blobs};
+use ratatoskr_identifiers::BlobRef;
 
 /// The receipt seam backed by the owned `chatgpt_archive` schema.
 #[derive(Debug, Clone)]
 pub struct PostgresReceiptRepository {
     pool: PgPool,
+    blobs: BlobStore,
 }
 
 impl PostgresReceiptRepository {
-    /// Creates a repository over an established pool.
+    /// Creates a repository over an established pool and the blob store whose objects the
+    /// exports it records reference.
     #[must_use]
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, blobs: BlobStore) -> Self {
+        Self { pool, blobs }
     }
 }
 
@@ -285,6 +290,8 @@ impl ReceiptRepository for PostgresReceiptRepository {
         let sha256_hex = request.sha256_hex;
         let byte_length = request.byte_length;
         let platform_operation = request.platform_operation;
+        let staged_path = request.staged_path;
+        let blobs = self.blobs.clone();
         Box::pin(async move {
             let mut transaction = pool.begin().await.map_err(backend)?;
 
@@ -311,6 +318,25 @@ impl ReceiptRepository for PostgresReceiptRepository {
                     existing_export_id: existing,
                 });
             }
+
+            // The first row that references this digest: take the digest lock, prove the object
+            // is present, and restore it from the staged bytes if an eraser won the race
+            // (XR-021 CONTRACTS.md R2-07).
+            let reference: BlobRef =
+                serde_json::from_value(blob_ref_json.clone()).map_err(RepositoryError::backend)?;
+            register_blobs(
+                &mut transaction,
+                &blobs,
+                &[Registration {
+                    reference: &reference,
+                    held: HeldBytes::Staged(&staged_path),
+                }],
+            )
+            .await
+            .map_err(|error| match error {
+                RegistrationError::Database(error) => backend(error),
+                RegistrationError::Unavailable => RepositoryError::BlobUnavailable,
+            })?;
 
             let export_id = Uuid::now_v7();
             let ai_archive_id = Uuid::now_v7();

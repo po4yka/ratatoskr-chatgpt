@@ -217,9 +217,11 @@ pub(crate) async fn receive_export_for(
     use ratatoskr_chatgpt_archive::receipt::repository::{PublishRequest, ReceiptRepository as _};
     use sha2::Digest as _;
 
-    let repository = PostgresReceiptRepository::new(pool.clone());
+    let repository = PostgresReceiptRepository::new(pool.clone(), blobs.clone());
     let digest = hex::encode(sha2::Sha256::digest(&bytes));
     let length = u64::try_from(bytes.len()).expect("a test archive fits in u64");
+    let staged = tempfile::NamedTempFile::new().expect("a staging file");
+    std::fs::write(staged.path(), &bytes).expect("the staging file is written");
     let raw = blobs
         .store(
             MEDIA_TYPE,
@@ -246,6 +248,7 @@ pub(crate) async fn receive_export_for(
             sha256_hex: digest,
             byte_length: length,
             platform_operation,
+            staged_path: staged.path().to_path_buf(),
         })
         .await
         .expect("the export is published");

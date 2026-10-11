@@ -234,7 +234,7 @@ impl InitialImportWorker {
             tx.rollback().await?;
             return Ok(());
         }
-        persist_artifacts(&mut tx, plan, stored_artifacts).await?;
+        persist_artifacts(&mut tx, &self.blobs, plan, stored_artifacts).await?;
         persist_projection(&mut tx, plan).await?;
         let counts = serde_json::json!({
             "conversations": summary.conversation_count,

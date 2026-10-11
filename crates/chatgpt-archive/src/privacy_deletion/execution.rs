@@ -120,12 +120,16 @@ impl PrivacyDeletionService {
         .await?;
         for (ordinal, encoded) in items {
             let reference: BlobRef = serde_json::from_value(encoded.clone())?;
-            // The tenant lock narrows the window in which a concurrent import of
-            // identical bytes could register a new reference between the check and
-            // the erase. A cross-tenant import is outside the lock; closing that
-            // needs blob reference counts and is a recorded residual risk.
+            // One transaction per blob, holding the tenant lock and then the digest lock from
+            // the re-check until the erase and the item update commit. Every registrar of a
+            // reference to this digest takes the same digest lock before it inserts its first
+            // referencing row, so a reference either commits before the re-check, and the blob
+            // is kept, or waits for the erase, finds the blob gone and restores it
+            // (XR-021 CONTRACTS.md R2-07).
             let mut transaction = self.pool.begin().await?;
             lock_tenant(&mut transaction, durable.tenant_id).await?;
+            crate::blob_protocol::blob_lock(&mut transaction, reference.digest.hex.as_str())
+                .await?;
             if rows::blob_is_referenced(&mut transaction, &encoded).await? {
                 set_item_state(
                     &mut transaction,
@@ -136,6 +140,9 @@ impl PrivacyDeletionService {
                 )
                 .await?;
             } else {
+                if let Some(gate) = &self.erase_gate {
+                    gate.pause_if(reference.digest.hex.as_str()).await;
+                }
                 self.blobs.erase(&reference).await?;
                 set_item_state(&mut transaction, request_id, ordinal, "erase", "purged").await?;
             }

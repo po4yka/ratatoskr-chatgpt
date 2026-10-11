@@ -381,6 +381,8 @@ An incomplete import reports `partially_succeeded` with the one contract warning
 
 Privacy deletion goes rows first, bytes second, completion last. One transaction under the tenant lock removes the scoped rows and their dependents (Platform operation bindings, reparse results), repoints the first-seen, last-seen and observed-in provenance of surviving rows, recomputes which blobs the remaining rows still reference, and queues the tombstones. The request is then `purging` and its items still list every blob to erase; the bytes are erased next and the audit is written last. Executing a request again after a crash at any point converges, and a third execution returns the stored report. An unpublished tombstone of an earlier request is never taken by a later deletion.
 
+Blob erasure and blob registration share one lock protocol, because the blob store is content-addressed and shared across tenants. The lock is `pg_advisory_xact_lock(hashtextextended('blob:' || <digest hex>, 0))`, always taken after the tenant lock and, when a transaction needs several, in ascending digest order. The eraser takes it for each blob, re-checks every reference column, and either keeps the blob or erases it, committing while it still holds the lock. Every registrar of a blob reference (the receipt that records a raw export and the import that records extracted artifacts) takes the same lock before it inserts the first row that references the digest and proves the object is present; if an eraser won the race it stores the bytes again from the staging file or the extracted bytes it still holds, and otherwise the attempt fails with a retryable error and registers nothing. No committed row references a missing blob.
+
 ## Commands and events
 
 Expected contracts include:

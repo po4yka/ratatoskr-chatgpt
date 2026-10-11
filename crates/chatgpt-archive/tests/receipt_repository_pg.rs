@@ -71,6 +71,22 @@ fn minimal_known_zip() -> Vec<u8> {
         .into_inner()
 }
 
+/// Writes `bytes` where the repository can restore a blob from them, as the receipt's staging
+/// file does.
+fn staged(directory: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
+    let path = directory.join(format!("staged-{}", Uuid::now_v7()));
+    std::fs::write(&path, bytes).expect("the staged file is written");
+    path
+}
+
+/// A blob store over a fresh temporary root, kept alive with the directory.
+fn fresh_blobs()
+-> Result<(tempfile::TempDir, ratatoskr_chatgpt_archive::BlobStore), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let blobs = ratatoskr_chatgpt_archive::BlobStore::new(root.path())?;
+    Ok((root, blobs))
+}
+
 fn test_url() -> Option<String> {
     #[allow(
         clippy::disallowed_methods,
@@ -82,6 +98,7 @@ fn test_url() -> Option<String> {
 
 async fn connected(
     url: &str,
+    blobs: &ratatoskr_chatgpt_archive::BlobStore,
 ) -> Result<(sqlx::PgPool, PostgresReceiptRepository), Box<dyn std::error::Error>> {
     let storage = ratatoskr_chatgpt_archive::config::StorageConfig {
         blob_root: None,
@@ -102,7 +119,10 @@ async fn connected(
         ratatoskr_chatgpt_archive::persistence::Database::connect(&storage, &limits).await?;
     database.apply_schema().await?;
     let pool = database.pool().clone();
-    Ok((pool.clone(), PostgresReceiptRepository::new(pool)))
+    Ok((
+        pool.clone(),
+        PostgresReceiptRepository::new(pool, blobs.clone()),
+    ))
 }
 
 async fn drive_until_operation_report(
@@ -136,7 +156,8 @@ async fn run_roundtrips_through_create_load_and_advance() -> Result<(), Box<dyn 
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (_pool, repository) = connected(&url).await?;
+    let (_root, blobs) = fresh_blobs()?;
+    let (_pool, repository) = connected(&url, &blobs).await?;
 
     let run_id = repository
         .create_run(
@@ -174,7 +195,8 @@ async fn guarded_transition_accepts_once_then_refuses_stale_source()
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (_pool, repository) = connected(&url).await?;
+    let (_root, blobs) = fresh_blobs()?;
+    let (_pool, repository) = connected(&url, &blobs).await?;
     let run_id = repository
         .create_run("acc-guard", &AcquisitionMode::ConsumerExport, MEDIA_TYPE)
         .await?;
@@ -201,9 +223,8 @@ async fn restart_worker_reports_actual_counts_for_original_and_duplicate_operati
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (pool, repository) = connected(&url).await?;
-    let root = tempfile::tempdir()?;
-    let blobs = ratatoskr_chatgpt_archive::BlobStore::new(root.path())?;
+    let (root, blobs) = fresh_blobs()?;
+    let (pool, repository) = connected(&url, &blobs).await?;
     let bytes = synthetic_zip();
     let digest = hex::encode(sha2::Sha256::digest(&bytes));
     let raw = blobs
@@ -233,6 +254,7 @@ async fn restart_worker_reports_actual_counts_for_original_and_duplicate_operati
             platform_operation: Some(PlatformOperation {
                 operation_id: first_operation,
             }),
+            staged_path: staged(root.path(), &bytes),
         })
         .await?;
     let before: i64 = sqlx::query_scalar(
@@ -303,9 +325,8 @@ async fn permanent_import_failure_is_terminal_and_reported_once()
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (pool, repository) = connected(&url).await?;
-    let root = tempfile::tempdir()?;
-    let blobs = ratatoskr_chatgpt_archive::BlobStore::new(root.path())?;
+    let (root, blobs) = fresh_blobs()?;
+    let (pool, repository) = connected(&url, &blobs).await?;
     let bytes = b"not a zip archive".to_vec();
     let digest = hex::encode(sha2::Sha256::digest(&bytes));
     let raw = blobs
@@ -333,6 +354,7 @@ async fn permanent_import_failure_is_terminal_and_reported_once()
             sha256_hex: digest,
             byte_length: bytes.len() as u64,
             platform_operation: Some(PlatformOperation { operation_id }),
+            staged_path: staged(root.path(), &bytes),
         })
         .await?;
 
@@ -387,9 +409,8 @@ async fn completeness_counts_unobserved_archive_categories()
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (pool, repository) = connected(&url).await?;
-    let root = tempfile::tempdir()?;
-    let blobs = ratatoskr_chatgpt_archive::BlobStore::new(root.path())?;
+    let (root, blobs) = fresh_blobs()?;
+    let (pool, repository) = connected(&url, &blobs).await?;
     let bytes = minimal_known_zip();
     let digest = hex::encode(sha2::Sha256::digest(&bytes));
     let raw = blobs
@@ -417,6 +438,7 @@ async fn completeness_counts_unobserved_archive_categories()
             sha256_hex: digest,
             byte_length: bytes.len() as u64,
             platform_operation: Some(PlatformOperation { operation_id }),
+            staged_path: staged(root.path(), &bytes),
         })
         .await?;
     let worker = ratatoskr_chatgpt_archive::InitialImportWorker::new(
@@ -452,7 +474,8 @@ async fn duplicate_lookup_scopes_by_account() -> Result<(), Box<dyn std::error::
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (pool, repository) = connected(&url).await?;
+    let (_root, blobs) = fresh_blobs()?;
+    let (pool, repository) = connected(&url, &blobs).await?;
 
     // Seed two accounts and an export under the first directly.
     let account_a = Uuid::now_v7();
@@ -495,29 +518,33 @@ async fn record_export_persists_reference_digest_and_link() -> Result<(), Box<dy
         eprintln!("skipping: CHATGPT_TEST_DATABASE_URL is not set");
         return Ok(());
     };
-    let (_pool, repository) = connected(&url).await?;
+    let (root, blobs) = fresh_blobs()?;
+    let (_pool, repository) = connected(&url, &blobs).await?;
     let account_ref = format!("acc-publish-{}", Uuid::now_v7());
     let run_id = repository
         .create_run(&account_ref, &AcquisitionMode::ConsumerExport, MEDIA_TYPE)
         .await?;
-    let digest = "d".repeat(64);
+    let bytes = vec![7_u8; 77];
+    let digest = hex::encode(sha2::Sha256::digest(&bytes));
     repository.record_hash(run_id, digest.clone(), 77).await?;
-
-    let blob_ref = serde_json::json!({
-        "owner_service": "ratatoskr-chatgpt",
-        "digest": { "algorithm": "sha256", "hex": digest },
-        "media_type": MEDIA_TYPE,
-        "length_bytes": 77
-    });
+    let raw = blobs
+        .store(
+            MEDIA_TYPE,
+            futures_util::stream::iter([Ok::<bytes::Bytes, std::io::Error>(bytes::Bytes::from(
+                bytes.clone(),
+            ))]),
+        )
+        .await?;
     let export = repository
         .publish_export(PublishRequest {
             run_id,
             account_external_ref: account_ref.clone(),
             mode: AcquisitionMode::ConsumerExport,
-            blob_ref_json: blob_ref,
+            blob_ref_json: serde_json::to_value(&raw)?,
             sha256_hex: digest.clone(),
             byte_length: 77,
             platform_operation: None,
+            staged_path: staged(root.path(), &bytes),
         })
         .await?;
 
@@ -535,6 +562,7 @@ async fn record_export_persists_reference_digest_and_link() -> Result<(), Box<dy
             sha256_hex: digest,
             byte_length: 77,
             platform_operation: None,
+            staged_path: staged(root.path(), &bytes),
         })
         .await;
     match second {

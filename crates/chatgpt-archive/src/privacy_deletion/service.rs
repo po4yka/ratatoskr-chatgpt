@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::{DeletionAction, DeletionInventoryItem, DeletionPlan, PrivacyDeletionScope};
+use super::{DeletionAction, DeletionInventoryItem, DeletionPlan, EraseGate, PrivacyDeletionScope};
 use crate::BlobStore;
 use crate::owner::OwnerResolver;
 
@@ -52,6 +53,7 @@ pub struct PrivacyDeletionService {
     pub(super) pool: PgPool,
     pub(super) blobs: BlobStore,
     pub(super) owners: OwnerResolver,
+    pub(super) erase_gate: Option<Arc<EraseGate>>,
 }
 
 impl PrivacyDeletionService {
@@ -62,7 +64,15 @@ impl PrivacyDeletionService {
             pool,
             blobs,
             owners: OwnerResolver::default(),
+            erase_gate: None,
         }
+    }
+
+    /// Installs a pause inside the eraser for tests of the blob lock protocol.
+    #[must_use]
+    pub fn with_erase_gate(mut self, gate: Arc<EraseGate>) -> Self {
+        self.erase_gate = Some(gate);
+        self
     }
 
     /// Binds archive accounts to the Platform users that own their tombstones.
