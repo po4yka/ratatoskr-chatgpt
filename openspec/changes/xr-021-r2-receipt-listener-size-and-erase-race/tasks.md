@@ -24,8 +24,8 @@
 
 ## 6. Operator example and variable names (R2-10)
 
-- [ ] 6.1 RED: `services/chatgpt-archive/tests/boot.rs` `the_shipped_example_loads` fails because `deploy/systemd/chatgpt.conf.example` does not exist.
-- [ ] 6.2 GREEN: the example, and `README.md` and `DEVELOPMENT.md` list the bus, receipt and size-guard variables.
+- [x] 6.1 RED: `services/chatgpt-archive/tests/boot.rs` `the_shipped_example_loads` fails because `deploy/systemd/chatgpt.conf.example` does not exist.
+- [x] 6.2 GREEN: the example, and `README.md` and `DEVELOPMENT.md` list the bus, receipt and size-guard variables.
 
 ## 7. Gate
 

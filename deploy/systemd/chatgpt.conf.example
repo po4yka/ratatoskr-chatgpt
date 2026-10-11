@@ -1,0 +1,23 @@
+# /etc/ratatoskr/chatgpt.conf — root:ratatoskr-chatgpt 0640, read by systemd as an EnvironmentFile and handed to a process running as `ratatoskr-chatgpt`.
+#
+# Every secret below is the placeholder CHANGE-ME; replace each one before starting the unit. `services/chatgpt-archive/tests/boot.rs` (`the_shipped_example_loads`) loads this file through the service's own configuration loader, so a renamed key or a flow that stops being enabled fails the gate.
+
+# Listeners (XR-021 CONTRACTS.md R2-01). The receipt listener is where Edge routes `/v1/chatgpt` and where its capability probe lands; it is loopback and serves nothing else, and it exists only while the database and the staging root below are configured. The operator listener serves /health/live, /health/ready, /metrics and /version, is host only, and must differ from the receipt address.
+RATATOSKR__RECEIPT__LISTEN_ADDRESS=127.0.0.1:8096
+RATATOSKR__ADMIN__LISTEN_ADDRESS=127.0.0.1:9085
+
+# Storage. Raw archives and extracted evidence live under the blob root. The staging root holds a receipt's bytes while they stream in; without it, or without the database, the receipt route and its listener do not mount.
+RATATOSKR__STORAGE__DATABASE_URL=postgres://ratatoskr_chatgpt:CHANGE-ME@127.0.0.1:5432/ratatoskr
+RATATOSKR__STORAGE__BLOB_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-chatgpt
+RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT=/mnt/nvme/ratatoskr/staging/ratatoskr-chatgpt
+
+# The receipt flow is DORMANT without the three keys below: with no account mapping the receipt knows no tenant, and with no event bus nothing is published. This example enables all of them.
+#
+# One Platform user per archive account, one to one: `<platform user uuid>=<account external ref>`, comma separated. The same mapping decides the Platform owner of every `ai_archive.*` fact and of every deletion tombstone. An account without a mapping emits no `ai_archive.*` fact (the operation report still flows), and a Platform receipt for a user without a mapping is refused. Replace the user UUID with the real Platform user and the reference with the account created for it.
+RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS=00000000-0000-7000-8000-0000000000a1=chatgpt-account-1
+# The broker identity is defined in Platform's `deploy/nats/ratatoskr.conf`; the seed is installed at the path every service uses for its own identity and is read at runtime, never logged.
+RATATOSKR__RECEIPT__EVENT_BUS_URL=nats://127.0.0.1:4222
+RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH=/etc/ratatoskr/chatgpt.nkey
+
+# Size limits. The event limit (65536..=8388608) bounds one published `ai_archive.*` envelope; a fact over it is not enqueued and the import is reported as partial. It stays below the broker's `max_payload: 8MB`.
+RATATOSKR__RECEIPT__MAX_EVENT_BYTES=8000000

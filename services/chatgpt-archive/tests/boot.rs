@@ -478,3 +478,85 @@ async fn no_receipt_listener_is_bound_without_a_database_and_a_staging_root()
     assert_eq!(capability_on_operator.code, 404);
     Ok(())
 }
+
+/// XR-021 CONTRACTS.md R2-10: the shipped operator example loads through the service's own
+/// configuration loader, so a renamed key, or a flow that silently stops being enabled, fails the
+/// gate instead of rotting in a file nobody loads.
+#[test]
+fn the_shipped_example_loads() -> Result<(), Box<dyn std::error::Error>> {
+    use secrecy::ExposeSecret as _;
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/systemd/chatgpt.conf.example"
+    );
+    let text = std::fs::read_to_string(path)?;
+    let entries: Vec<(String, String)> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("every setting is KEY=value, got {line:?}"));
+            (key.to_owned(), value.to_owned())
+        })
+        .collect();
+
+    let config = ratatoskr_chatgpt_archive::config::Config::from_environment(entries.clone())
+        .map_err(|error| format!("the example does not load: {error}"))?;
+
+    assert_eq!(config.admin.listen_address.to_string(), "127.0.0.1:9085");
+    assert_eq!(config.receipt.listen_address.to_string(), "127.0.0.1:8096");
+    assert!(
+        config.storage.database_url.is_some(),
+        "the receipt flow needs a database"
+    );
+    assert!(
+        config
+            .storage
+            .blob_root
+            .is_some_and(|root| root.is_absolute()),
+        "the blob root is an absolute path"
+    );
+    assert!(
+        config
+            .storage
+            .receipt_staging_root
+            .is_some_and(|root| root.is_absolute()),
+        "the receipt route mounts only with a staging root"
+    );
+    assert_eq!(
+        config.receipt.platform_accounts.len(),
+        1,
+        "without an account mapping the receipt knows no tenant and emits no fact"
+    );
+    assert_eq!(
+        config
+            .receipt
+            .event_bus_url
+            .as_ref()
+            .map(|url| url.expose_secret().to_owned())
+            .as_deref(),
+        Some("nats://127.0.0.1:4222")
+    );
+    assert_eq!(
+        config.receipt.event_bus_nkey_seed_path,
+        Some(std::path::PathBuf::from("/etc/ratatoskr/chatgpt.nkey"))
+    );
+    assert_eq!(config.receipt.max_event_bytes, 8_000_000);
+    for secret in entries
+        .iter()
+        .filter(|(_, value)| value.contains("CHANGE-ME"))
+    {
+        assert!(
+            secret.0 == "RATATOSKR__STORAGE__DATABASE_URL",
+            "only the database password is a placeholder, got {}",
+            secret.0
+        );
+    }
+    assert!(
+        text.contains("emits no `ai_archive.*` fact") && text.contains("refused"),
+        "the mapping comment says what an unmapped account does"
+    );
+    Ok(())
+}

@@ -41,6 +41,22 @@ curl -X POST http://127.0.0.1:8096/exports \
   --data-binary @chatgpt-export.zip
 ```
 
+### Deployed configuration
+
+`deploy/systemd/chatgpt.conf.example` is the operator example for a host deployment. It sets every key the Platform flow needs, with `CHANGE-ME` for the database password, and `services/chatgpt-archive/tests/boot.rs` (`the_shipped_example_loads`) loads it through the service's own configuration loader. The keys that enable the flow, which is silently dormant without them:
+
+| Variable | Meaning |
+| --- | --- |
+| `RATATOSKR__RECEIPT__LISTEN_ADDRESS` | The receipt listener Edge probes and forwards to. Default `127.0.0.1:8096`, loopback only, must differ from the operator address. Bound only while the database and staging root are configured. |
+| `RATATOSKR__ADMIN__LISTEN_ADDRESS` | The operator listener. Default `127.0.0.1:9085`. |
+| `RATATOSKR__STORAGE__DATABASE_URL`, `RATATOSKR__STORAGE__BLOB_ROOT`, `RATATOSKR__STORAGE__RECEIPT_STAGING_ROOT` | PostgreSQL, the content-addressed blob root and the receipt staging directory. The blob root is required; the receipt route mounts only with the other two. |
+| `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` | `<platform user uuid>=<account external ref>`, comma separated. An account without a mapping emits no `ai_archive.*` fact, and a Platform receipt for an unmapped user is refused. |
+| `RATATOSKR__RECEIPT__EVENT_BUS_URL` | The `nats://` or `tls://` endpoint that receives operation reports and `ai_archive.*` facts. Required when an account mapping is configured. |
+| `RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH` | Absolute path of the service identity's NKey seed, normally `/etc/ratatoskr/chatgpt.nkey`. Read at runtime and never logged. |
+| `RATATOSKR__RECEIPT__MAX_EVENT_BYTES` | Largest serialized `ai_archive.*` envelope the service enqueues. Default `8000000`, accepted `65536` through `8388608`. A larger fact is not enqueued and the import is reported `partially_succeeded` with the warning `ai_archive.facts.too_large`. The archive never truncates or splits a conversation. |
+
+The outbox pump also compares each stored envelope with the connected broker's `max_payload` minus 1 KiB. A row above that is marked undeliverable (`outbox_events.undeliverable_at`, `last_error = 'payload_too_large'`), skipped from then on and counted in `chatgpt_archive_outbox_undeliverable_total{class}`; it never makes the service not ready. A transient broker failure backs the row off and retries it, and never gives it up.
+
 The validation commands are in `DEVELOPMENT.md`; CI enforces the same list.
 The private real-export discovery and minimized golden admission process is documented in
 [`docs/testing/OWNER_FIXTURE_DISCOVERY.md`](docs/testing/OWNER_FIXTURE_DISCOVERY.md).
