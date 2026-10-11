@@ -56,6 +56,7 @@ pub mod persistence;
 pub use persistence::{Database, PersistenceError};
 
 mod contract_projection;
+mod entity_versions;
 mod initial_import;
 mod normalized_persist;
 pub mod outbox;

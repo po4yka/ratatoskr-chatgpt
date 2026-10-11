@@ -15,6 +15,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::execution::DurableRequest;
+use super::restore::restore_retained_versions;
 use super::service::{
     FinalizationFault, PrivacyDeletionError, PrivacyDeletionService, lock_tenant,
 };
@@ -71,6 +72,8 @@ pub(super) async fn remove_rows(
     // the deleted export (XR-021 CONTRACTS.md R3-06).
     let survivors = find_survivors(&mut transaction, request_id).await?;
     delete_scoped_rows(&mut transaction, request_id, durable.tenant_id).await?;
+    // A survivor must hold only what a retained export holds, before it is announced again.
+    restore_retained_versions(&mut transaction, durable.tenant_id).await?;
     let removed_at = database_now(&mut transaction).await?;
     insert_tombstones(
         &mut transaction,

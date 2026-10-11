@@ -4,8 +4,9 @@
 //! a later export that sees the same record announces nothing (its digest is unchanged). When a
 //! deletion tombstones that archive, Knowledge drops everything announced under it, including
 //! what a retained export still holds. Each such survivor is announced again as an update whose
-//! provenance names the earliest retained export that observed it, stamped after the tombstone so
-//! a consumer applies it afterwards.
+//! provenance names the earliest retained export that presented the content the record holds,
+//! stamped after the tombstone so a consumer applies it afterwards. The content itself was put
+//! back to a version a retained export presented before this runs (`privacy_deletion::restore`).
 
 use ratatoskr_ai_archive_contracts::{
     AiArchiveProvenance, AiConversationUpdated, AiProjectUpdated, AiProvider, ParserName,
@@ -217,7 +218,9 @@ impl RetainedImport {
     }
 }
 
-/// The earliest retained export (by `received_at`, then id) that observed the record.
+/// The earliest retained export (by `received_at`, then id) that presented the content the record
+/// holds now. An export that presented older content is evidence of that content, not of this, so
+/// it is named only when no retained export presented the current content at all.
 async fn earliest_retained(
     transaction: &mut Tx<'_>,
     kind: &str,
@@ -227,7 +230,13 @@ async fn earliest_retained(
         "SELECT o.export_id FROM chatgpt_archive.export_entity_observations o
          JOIN chatgpt_archive.exports e ON e.id = o.export_id
          WHERE o.entity_kind = $1 AND o.entity_id = $2
-         ORDER BY e.received_at, e.id LIMIT 1",
+         ORDER BY o.content_digest IS DISTINCT FROM
+                    (CASE WHEN $1 = 'project'
+                          THEN (SELECT content_digest FROM chatgpt_archive.projects WHERE id = $2)
+                          ELSE (SELECT content_digest FROM chatgpt_archive.conversations
+                                WHERE id = $2) END),
+                  e.received_at, e.id
+         LIMIT 1",
     )
     .bind(kind)
     .bind(id)

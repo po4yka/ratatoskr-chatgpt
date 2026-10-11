@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.projects (
     -- reads identical content leaves the stamp, and so the content digest, unchanged.
     parser_name        TEXT,
     parser_version     TEXT,
+    -- The digest of the content the row holds now. The row is the newest version of the
+    -- record; `entity_versions` keeps the version each retained export presented.
+    content_digest     TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (account_id, external_id)
@@ -112,6 +115,8 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.conversations (
     -- The parser release that last wrote this conversation's messages.
     parser_name        TEXT,
     parser_version     TEXT,
+    -- The digest of the content the row holds now (see `projects.content_digest`).
+    content_digest     TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- One record per provider conversation id for an account, however many cumulative exports
@@ -205,7 +210,24 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.export_entity_observations (
     entity_kind    TEXT NOT NULL CHECK (entity_kind IN ('project', 'conversation', 'message', 'asset')),
     entity_id      UUID NOT NULL,
     observed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The digest of the version of a project or conversation this export presented, which names
+    -- a row of `entity_versions`. Null for messages and assets.
+    content_digest TEXT,
     CONSTRAINT export_observation_identity_unique UNIQUE (export_id, entity_kind, entity_id)
+);
+
+-- The content each export presented for a project or conversation, one row per distinct
+-- content. The shared row of the record holds only the newest version, so this is what a
+-- privacy deletion restores a record from when the export that wrote the newest version is
+-- deleted (XR-021 CONTRACTS.md R3-06). A version lives exactly as long as an export observes
+-- its digest; the deletion removes the rest, so no content of a deleted export survives here.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.entity_versions (
+    entity_kind     TEXT NOT NULL CHECK (entity_kind IN ('project', 'conversation')),
+    entity_id       UUID NOT NULL,
+    content_digest  TEXT NOT NULL,
+    snapshot        JSONB NOT NULL,
+    recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (entity_kind, entity_id, content_digest)
 );
 
 -- Extracted bytes remain separate from the immutable provider-original

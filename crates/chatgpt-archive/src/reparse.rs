@@ -14,8 +14,12 @@ use uuid::Uuid;
 
 use crate::blob_protocol::{HeldBytes, Registration, register_blobs};
 use crate::contract_projection::{FactScope, HeadPolicy, ProjectionError, project_import_facts};
+use crate::entity_versions::{
+    CONVERSATION, ConversationVersion, VersionError, append_revision, keep_conversation_version,
+    observe,
+};
 use crate::normalized_persist::{
-    persist_conversation_detail, persist_projects, project_of_conversation,
+    persist_conversation_detail, persist_projects, project_external_id_of, project_of_conversation,
 };
 use crate::owner::OwnerResolver;
 use crate::privacy_deletion::service::lock_tenant;
@@ -136,6 +140,15 @@ pub enum ReparseError {
     /// retryable class: nothing was registered (XR-021 CONTRACTS.md R2-07).
     #[error("an extracted artifact's blob is missing and could not be restored")]
     BlobUnavailable,
+}
+
+impl From<VersionError> for ReparseError {
+    fn from(error: VersionError) -> Self {
+        match error {
+            VersionError::Store(error) => Self::Store(error),
+            VersionError::Encode(error) => Self::Encode(error),
+        }
+    }
 }
 
 impl From<crate::blob_protocol::RegistrationError> for ReparseError {
@@ -508,10 +521,7 @@ pub(crate) async fn current_projection(
     export_id: Uuid,
 ) -> Result<BTreeMap<String, CurrentConversation>, sqlx::Error> {
     let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT c.id, c.external_id,
-           (SELECT r.payload ->> 'digest' FROM chatgpt_archive.revisions r
-            WHERE r.entity_table = 'conversations' AND r.entity_id = c.id
-            ORDER BY r.revision_number DESC LIMIT 1)
+        "SELECT c.id, c.external_id, o.content_digest
          FROM chatgpt_archive.conversations c
          JOIN chatgpt_archive.export_entity_observations o
            ON o.entity_kind = 'conversation' AND o.entity_id = c.id
@@ -674,36 +684,19 @@ pub(crate) async fn persist_projection(
         let digest = conversation_digest(parsed);
         // One row per provider conversation id for the account, shared by every export that
         // holds it (XR-021 CONTRACTS.md R3-06).
-        let id: Uuid = sqlx::query_scalar(
+        let (id, held): (Uuid, Option<String>) = sqlx::query_as(
             "INSERT INTO chatgpt_archive.conversations (id, account_id, external_id)
              VALUES ($1, $2, $3)
              ON CONFLICT (account_id, external_id) DO UPDATE SET updated_at = now()
-             RETURNING id",
+             RETURNING id, content_digest",
         )
         .bind(Uuid::now_v7())
         .bind(plan.tenant_id)
         .bind(&parsed.external_id)
         .fetch_one(&mut **transaction)
         .await?;
-        sqlx::query(
-            "INSERT INTO chatgpt_archive.export_entity_observations
-             (export_id, entity_kind, entity_id) VALUES ($1, 'conversation', $2)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(plan.export_id)
-        .bind(id)
-        .execute(&mut **transaction)
-        .await?;
-        let latest: Option<String> = sqlx::query_scalar(
-            "SELECT payload ->> 'digest' FROM chatgpt_archive.revisions
-             WHERE entity_table = 'conversations' AND entity_id = $1
-             ORDER BY revision_number DESC LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&mut **transaction)
-        .await?
-        .flatten();
-        if latest.as_deref() == Some(digest.as_str()) {
+        observe(transaction, plan.export_id, CONVERSATION, id, &digest).await?;
+        if held.as_deref() == Some(digest.as_str()) {
             // Read again, unchanged: the export saw it, and nothing else about it moves.
             sqlx::query(
                 "UPDATE chatgpt_archive.conversations
@@ -714,44 +707,48 @@ pub(crate) async fn persist_projection(
             .bind(plan.export_id)
             .execute(&mut **transaction)
             .await?;
-            // Its messages are evidence of this export too, so deleting an earlier export
-            // keeps them with the conversation that stays.
+            // The messages this export presented are evidence of it too, so deleting an earlier
+            // export keeps them with the conversation that stays. A message only an earlier
+            // version held is not.
+            let presented: Vec<&str> = parsed
+                .messages
+                .iter()
+                .map(|message| message.external_id.as_str())
+                .collect();
             sqlx::query(
                 "INSERT INTO chatgpt_archive.export_entity_observations
                  (export_id, entity_kind, entity_id)
                  SELECT $1, 'message', m.id FROM chatgpt_archive.messages m
-                 WHERE m.conversation_id = $2
+                 WHERE m.conversation_id = $2 AND m.external_id = ANY($3)
                  ON CONFLICT DO NOTHING",
             )
             .bind(plan.export_id)
             .bind(id)
+            .bind(&presented)
             .execute(&mut **transaction)
             .await?;
             continue;
         }
-        let revision: i32 = sqlx::query_scalar(
-            "SELECT COALESCE(max(revision_number), 0) + 1
-             FROM chatgpt_archive.revisions
-             WHERE entity_table = 'conversations' AND entity_id = $1",
+        let parser = &plan.report.target_parser;
+        append_revision(
+            transaction,
+            id,
+            plan.export_id,
+            &digest,
+            (&parser.name, &parser.version),
         )
-        .bind(id)
-        .fetch_one(&mut **transaction)
         .await?;
-        sqlx::query(
-            "INSERT INTO chatgpt_archive.revisions
-             (id, entity_table, entity_id, revision_number, observed_in, payload)
-             VALUES ($1, 'conversations', $2, $3, $4, $5)",
+        keep_conversation_version(
+            transaction,
+            id,
+            &digest,
+            &ConversationVersion {
+                conversation: parsed.clone(),
+                project_external_id: project_external_id_of(&plan.parsed, &parsed.external_id),
+                parser_name: parser.name.clone(),
+                parser_version: parser.version.clone(),
+            },
         )
-        .bind(Uuid::now_v7())
-        .bind(id)
-        .bind(revision)
-        .bind(plan.export_id)
-        .bind(serde_json::json!({
-            "digest": digest,
-            "parser_name": plan.report.target_parser.name,
-            "parser_version": plan.report.target_parser.version,
-        }))
-        .execute(&mut **transaction)
         .await?;
         persist_conversation_detail(
             transaction,

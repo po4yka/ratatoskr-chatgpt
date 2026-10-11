@@ -12,6 +12,9 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::entity_versions::{
+    PROJECT, ProjectVersion, VersionError, keep_project_version, observe,
+};
 use crate::{
     ContentPartKind, MessageRole, ParsedContentPart, ParsedConversation, ParsedConversations,
     ParsedMessage, ParsedProject, ParserId,
@@ -34,66 +37,66 @@ fn storable_epoch(seconds: Option<f64>) -> Option<f64> {
 ///
 /// # Errors
 ///
-/// Returns the database error when a row cannot be written.
+/// Returns the database or encoding error when a row cannot be written.
 pub(crate) async fn persist_projects(
     transaction: &mut Tx<'_>,
     tenant_id: Uuid,
     export_id: Uuid,
     parsed: &ParsedConversations,
     parser: &ParserId,
-) -> Result<BTreeMap<String, Uuid>, sqlx::Error> {
+) -> Result<BTreeMap<String, Uuid>, VersionError> {
     let mut ids = BTreeMap::new();
     for project in &parsed.projects {
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO chatgpt_archive.projects
-             (id, account_id, external_id, title, description, instructions,
-              first_seen_export, last_seen_export, parser_name, parser_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
-             ON CONFLICT (account_id, external_id) DO UPDATE
-             SET parser_name = CASE WHEN (chatgpt_archive.projects.title,
-                                          chatgpt_archive.projects.description,
-                                          chatgpt_archive.projects.instructions)
-                                     IS NOT DISTINCT FROM
-                                     (EXCLUDED.title, EXCLUDED.description, EXCLUDED.instructions)
-                                     AND chatgpt_archive.projects.parser_name IS NOT NULL
-                                THEN chatgpt_archive.projects.parser_name
-                                ELSE EXCLUDED.parser_name END,
-                 parser_version = CASE WHEN (chatgpt_archive.projects.title,
-                                             chatgpt_archive.projects.description,
-                                             chatgpt_archive.projects.instructions)
-                                        IS NOT DISTINCT FROM
-                                        (EXCLUDED.title, EXCLUDED.description,
-                                         EXCLUDED.instructions)
-                                        AND chatgpt_archive.projects.parser_version IS NOT NULL
-                                   THEN chatgpt_archive.projects.parser_version
-                                   ELSE EXCLUDED.parser_version END,
-                 title = EXCLUDED.title, description = EXCLUDED.description,
-                 instructions = EXCLUDED.instructions,
-                 first_seen_export = COALESCE(chatgpt_archive.projects.first_seen_export,
-                                              EXCLUDED.first_seen_export),
-                 last_seen_export = EXCLUDED.last_seen_export, updated_at = now()
-             RETURNING id",
-        )
-        .bind(Uuid::now_v7())
-        .bind(tenant_id)
-        .bind(&project.external_id)
-        .bind(&project.title)
-        .bind(&project.description)
-        .bind(instruction_text(project))
-        .bind(export_id)
-        .bind(&parser.name)
-        .bind(&parser.version)
-        .fetch_one(&mut **transaction)
-        .await?;
-        sqlx::query(
-            "INSERT INTO chatgpt_archive.export_entity_observations
-             (export_id, entity_kind, entity_id) VALUES ($1, 'project', $2)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(export_id)
-        .bind(id)
-        .execute(&mut **transaction)
-        .await?;
+        let mut version = ProjectVersion {
+            title: project.title.clone(),
+            description: project.description.clone(),
+            instructions: instruction_text(project),
+            parser_name: parser.name.clone(),
+            parser_version: parser.version.clone(),
+        };
+        let digest = version.digest();
+        let (id, stamp_name, stamp_version): (Uuid, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "INSERT INTO chatgpt_archive.projects
+                 (id, account_id, external_id, title, description, instructions,
+                  first_seen_export, last_seen_export, parser_name, parser_version,
+                  content_digest)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, $10)
+                 ON CONFLICT (account_id, external_id) DO UPDATE
+                 SET parser_name = CASE WHEN chatgpt_archive.projects.content_digest = $10
+                                         AND chatgpt_archive.projects.parser_name IS NOT NULL
+                                    THEN chatgpt_archive.projects.parser_name
+                                    ELSE EXCLUDED.parser_name END,
+                     parser_version = CASE WHEN chatgpt_archive.projects.content_digest = $10
+                                            AND chatgpt_archive.projects.parser_version
+                                                IS NOT NULL
+                                       THEN chatgpt_archive.projects.parser_version
+                                       ELSE EXCLUDED.parser_version END,
+                     title = EXCLUDED.title, description = EXCLUDED.description,
+                     instructions = EXCLUDED.instructions,
+                     content_digest = EXCLUDED.content_digest,
+                     first_seen_export = COALESCE(chatgpt_archive.projects.first_seen_export,
+                                                  EXCLUDED.first_seen_export),
+                     last_seen_export = EXCLUDED.last_seen_export, updated_at = now()
+                 RETURNING id, parser_name, parser_version",
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(&project.external_id)
+            .bind(&version.title)
+            .bind(&version.description)
+            .bind(&version.instructions)
+            .bind(export_id)
+            .bind(&parser.name)
+            .bind(&parser.version)
+            .bind(&digest)
+            .fetch_one(&mut **transaction)
+            .await?;
+        // The stamp the row carries now is the one this content was first written under.
+        version.parser_name = stamp_name.unwrap_or(version.parser_name);
+        version.parser_version = stamp_version.unwrap_or(version.parser_version);
+        observe(transaction, export_id, PROJECT, id, &digest).await?;
+        keep_project_version(transaction, id, &version).await?;
         ids.insert(project.external_id.clone(), id);
     }
     Ok(ids)
@@ -272,12 +275,11 @@ async fn persist_parts(
     Ok(())
 }
 
-/// The project row a conversation belongs to, as evidenced by the project list.
-pub(crate) fn project_of_conversation(
+/// The provider id of the project the project list places a conversation in.
+pub(crate) fn project_external_id_of(
     parsed: &ParsedConversations,
-    projects: &BTreeMap<String, Uuid>,
     conversation_external_id: &str,
-) -> Option<Uuid> {
+) -> Option<String> {
     parsed
         .projects
         .iter()
@@ -287,7 +289,17 @@ pub(crate) fn project_of_conversation(
                 .iter()
                 .any(|id| id == conversation_external_id)
         })
-        .and_then(|project| projects.get(&project.external_id).copied())
+        .map(|project| project.external_id.clone())
+}
+
+/// The project row a conversation belongs to, as evidenced by the project list.
+pub(crate) fn project_of_conversation(
+    parsed: &ParsedConversations,
+    projects: &BTreeMap<String, Uuid>,
+    conversation_external_id: &str,
+) -> Option<Uuid> {
+    project_external_id_of(parsed, conversation_external_id)
+        .and_then(|external_id| projects.get(&external_id).copied())
 }
 
 const fn message_role(role: &MessageRole) -> &'static str {

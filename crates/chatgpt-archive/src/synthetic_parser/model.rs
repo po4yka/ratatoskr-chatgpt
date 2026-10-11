@@ -153,7 +153,7 @@ pub enum AssetAnomaly {
 }
 
 /// A normalized conversation projection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParsedConversation {
     /// Provider conversation identifier.
     pub external_id: String,
@@ -170,7 +170,7 @@ pub struct ParsedConversation {
 }
 
 /// A normalized message projection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParsedMessage {
     /// Provider message identifier.
     pub external_id: String,
@@ -191,7 +191,8 @@ pub struct ParsedMessage {
 }
 
 /// A provider message role normalized for the owned schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     /// System-authored content.
     System,
@@ -208,7 +209,7 @@ pub enum MessageRole {
 }
 
 /// One heterogeneous content part projection.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParsedContentPart {
     /// Zero-based position inside the provider message.
     pub ordinal: usize,
@@ -219,7 +220,8 @@ pub struct ParsedContentPart {
 }
 
 /// A content-parts schema type recognized by the synthetic parser.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContentPartKind {
     /// Plain text.
     Text,
