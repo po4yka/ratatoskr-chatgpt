@@ -19,8 +19,8 @@
 
 ## 5. A duplicate of a failed import is reported, a failed import is logged (R3-04 rule 2, R3-07 rule 2)
 
-- [ ] 5.1 RED: `tests/import_state.rs` `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class` fail.
-- [ ] 5.2 GREEN: the selector takes `failed` runs with a bound unreported operation and `mark_permanent_failure` logs its class.
+- [x] 5.1 RED: `tests/import_state.rs` `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class` fail.
+- [x] 5.2 GREEN: the selector takes `failed` runs with a bound unreported operation and `mark_permanent_failure` logs its class.
 
 ## 6. An import can be complete (R3-05)
 

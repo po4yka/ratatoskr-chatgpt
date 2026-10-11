@@ -89,7 +89,7 @@ impl InitialImportWorker {
                  FROM chatgpt_archive.import_runs r
                  JOIN chatgpt_archive.exports e ON e.id = r.export_id
                  WHERE r.state IN ('stored', 'inspected', 'parsed', 'reconciled')
-                    OR (r.state IN ('completed', 'partial') AND EXISTS (
+                    OR (r.state IN ('completed', 'partial', 'failed') AND EXISTS (
                         SELECT 1 FROM chatgpt_archive.platform_operation_imports p
                         WHERE p.import_run_id = r.id AND p.reported_at IS NULL))
                  ORDER BY EXISTS (
@@ -104,6 +104,15 @@ impl InitialImportWorker {
             return Ok(0);
         };
 
+        if state == "failed" {
+            // A duplicate upload bound its operation to a run that already failed for good: the
+            // operation owes the same failed report (XR-021 CONTRACTS.md R3-04 rule 2).
+            let mut tx = self.pool.begin().await?;
+            lock_tenant(&mut tx, tenant_id).await?;
+            enqueue_failed_reports(&mut tx, run_id, export_id, tenant_id).await?;
+            tx.commit().await?;
+            return Ok(1);
+        }
         if matches!(state.as_str(), "completed" | "partial") {
             let summary = load_import_summary(&self.pool, run_id).await?;
             enqueue_operation_reports(
@@ -119,7 +128,7 @@ impl InitialImportWorker {
         let (plan, stored_artifacts) = match prepared {
             Ok(prepared) => prepared,
             Err(error) if is_permanent_import_error(&error) => {
-                mark_permanent_failure(&self.pool, run_id, export_id, tenant_id).await?;
+                mark_permanent_failure(&self.pool, run_id, export_id, tenant_id, &error).await?;
                 return Ok(1);
             }
             Err(error) => return Err(error),
@@ -351,15 +360,25 @@ const fn is_permanent_import_error(error: &ReparseError) -> bool {
     )
 }
 
+/// The closed log class of a permanent import failure (XR-021 CONTRACTS.md R3-07 rule 2).
+const fn permanent_failure_class(error: &ReparseError) -> &'static str {
+    match error {
+        ReparseError::Intake(_) | ReparseError::Blob(_) => "archive_invalid",
+        ReparseError::Conflict => "reparse_conflict",
+        _ => "parse_failed",
+    }
+}
+
 async fn mark_permanent_failure(
     pool: &PgPool,
     run_id: Uuid,
     export_id: Uuid,
     tenant_id: Uuid,
+    error: &ReparseError,
 ) -> Result<(), ReparseError> {
     let mut tx = pool.begin().await?;
     lock_tenant(&mut tx, tenant_id).await?;
-    sqlx::query(
+    let marked = sqlx::query(
         "UPDATE chatgpt_archive.import_runs
          SET state = 'failed', finished_at = now()
          WHERE id = $1 AND state NOT IN ('completed', 'partial', 'failed')",
@@ -367,12 +386,33 @@ async fn mark_permanent_failure(
     .bind(run_id)
     .execute(&mut *tx)
     .await?;
+    enqueue_failed_reports(&mut tx, run_id, export_id, tenant_id).await?;
+    tx.commit().await?;
+    if marked.rows_affected() > 0 {
+        // The class and the run id only: never an archive path, name or content.
+        tracing::warn!(
+            class = permanent_failure_class(error),
+            run_id = %run_id,
+            "import failed permanently"
+        );
+    }
+    Ok(())
+}
+
+/// Queues the `failed` operation report of every operation bound to `run_id` that has not been
+/// reported yet, once each.
+async fn enqueue_failed_reports(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: Uuid,
+    export_id: Uuid,
+    tenant_id: Uuid,
+) -> Result<(), ReparseError> {
     let operations: Vec<Uuid> = sqlx::query_scalar(
         "SELECT operation_id FROM chatgpt_archive.platform_operation_imports
          WHERE import_run_id = $1 AND reported_at IS NULL ORDER BY operation_id",
     )
     .bind(run_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     for operation_id in operations {
         let report =
@@ -390,17 +430,16 @@ async fn mark_permanent_failure(
         .bind(export_id)
         .bind(serde_json::to_value(payload)?)
         .bind(format!("platform.operation.reported.v1:{operation_id}"))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         sqlx::query(
             "UPDATE chatgpt_archive.platform_operation_imports SET reported_at = now()
              WHERE operation_id = $1 AND reported_at IS NULL",
         )
         .bind(operation_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
