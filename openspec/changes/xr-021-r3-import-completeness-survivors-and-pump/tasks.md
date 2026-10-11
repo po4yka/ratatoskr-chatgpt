@@ -41,4 +41,4 @@
 
 ## 9. Gate
 
-- [ ] 9.1 Run `cargo fmt --all -- --check`, clippy with `-D warnings`, the 850-line check, `cargo test --workspace --locked`, `cargo deny --locked check`, `openspec validate --all --strict` and `openspec validate --archived`; every RED listed above was run and observed failing for its stated reason before its GREEN.
+- [x] 9.1 The gate passed locally against a private PostgreSQL 17 and a JetStream broker: `cargo fmt --all -- --check`, clippy with `-D warnings`, the 850-line check, `cargo build` and `cargo test --workspace --locked` (222 tests, none ignored), `cargo deny --locked check`, `openspec validate --all --strict` and `openspec validate --archived`. Every RED listed above was run and observed failing for its stated reason before its GREEN, except where a task says otherwise.
