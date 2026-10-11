@@ -67,6 +67,11 @@ pub enum ParserExecutionError {
     /// The parser rejected or could not normalize the supplied evidence.
     #[error("compiled archive parser failed")]
     Failed,
+    /// The blob store failed while the parser stored or verified an entry. This says nothing
+    /// about the evidence, so the importer retries it instead of failing the import for good
+    /// (XR-021 CONTRACTS.md R3-04 rule 2).
+    #[error("compiled archive parser could not reach storage")]
+    Storage,
 }
 
 /// Executable boundary paired with one parser declaration.

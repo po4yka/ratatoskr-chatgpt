@@ -482,3 +482,78 @@ async fn an_unrecognized_record_is_still_a_gap() {
     assert_eq!(imported.gaps, ["unrecognized_record"]);
     assert_eq!(imported.report["payload"]["status"], "partially_succeeded");
 }
+
+// ---- XR-021 CONTRACTS.md R3-04 rule 2: a storage fault leaves the import retryable ----
+
+/// Makes the store's staging path a regular file, which no write can pass, and puts it back.
+struct StagingFault(std::path::PathBuf);
+
+impl StagingFault {
+    fn inject(root: &std::path::Path) -> Self {
+        let staging = root.join("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::write(&staging, b"not a directory").expect("the fault can be injected");
+        Self(staging)
+    }
+
+    fn clear(&self) {
+        std::fs::remove_file(&self.0).expect("the fault can be cleared");
+        std::fs::create_dir_all(&self.0).expect("staging is a directory again");
+    }
+}
+
+#[tokio::test]
+async fn a_storage_fault_during_an_assets_import_is_retried_not_failed() {
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let operation = Uuid::now_v7();
+    let received = receive_export_for(
+        database.pool(),
+        &blobs,
+        "acc-storage-fault",
+        common::zip_of(&[
+            ("conversations.json", ARCHIVE_CONVERSATIONS),
+            ("assets.json", &note_declaration()),
+            ("assets/note.txt", NOTE),
+        ]),
+        Some(PlatformOperation {
+            operation_id: operation,
+        }),
+    )
+    .await;
+    let worker = worker(&database, &blobs);
+    let run_state = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM chatgpt_archive.import_runs WHERE export_id = $1",
+        )
+        .bind(received.export)
+        .fetch_one(database.pool())
+        .await
+        .expect("the run is readable")
+    };
+
+    let fault = StagingFault::inject(root.path());
+    let faulted = worker.process_pending_once().await;
+    assert!(
+        faulted.is_err(),
+        "a storage fault is an error the pump retries, got {faulted:?}"
+    );
+    assert_ne!(
+        run_state().await,
+        "failed",
+        "the run is not failed for good"
+    );
+    assert!(
+        reports(&database, operation).await.is_empty(),
+        "no failed report is queued for a fault that can heal"
+    );
+
+    fault.clear();
+    drain(&worker).await;
+    assert_eq!(run_state().await, "completed", "the next pass imports it");
+    let reported = reports(&database, operation).await;
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0]["payload"]["status"], "succeeded");
+    database.discard().await;
+}

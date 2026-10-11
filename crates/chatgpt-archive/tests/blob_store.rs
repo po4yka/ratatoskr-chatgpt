@@ -3,6 +3,8 @@
 //! Every test targets the facade only; the on-disk layout is an implementation
 //! detail no test may depend on.
 
+#![allow(clippy::expect_used, reason = "test failures report through panics")]
+
 use bytes::Bytes;
 use futures_util::stream;
 use ratatoskr_chatgpt_archive::blob_store::BlobStore;
@@ -232,4 +234,57 @@ async fn erase_refuses_foreign_and_malformed_references() {
         .verify(&malformed_target)
         .await
         .expect("malformed refusal must leave local bytes intact");
+}
+
+// ---- XR-021 CONTRACTS.md R3-04 rule 2: a storage fault is not a missing object ----
+
+/// Makes the directory holding `path` unreadable and restores it on drop, so a failed assertion
+/// still lets the temporary root be removed.
+struct Unreadable(std::path::PathBuf);
+
+impl Unreadable {
+    fn around(path: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = path.parent().expect("an object lives in a directory");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o000))
+            .expect("the object directory can be locked in the test");
+        Self(directory.to_path_buf())
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// An object that cannot be read because the device refuses is a retryable fault. Only an object
+/// that is absent or does not verify is missing.
+#[tokio::test]
+async fn an_unreadable_object_is_unavailable_and_an_absent_one_is_missing() {
+    use ratatoskr_chatgpt_archive::blob_store::BlobStoreError;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let store = BlobStore::new(root.path()).expect("owner identity is fixed");
+    let reference = store
+        .store(MEDIA_TYPE, stream_of(b"payload behind a refused read"))
+        .await
+        .expect("store must succeed");
+    let path = store.resolve(&reference).expect("resolution gives a path");
+
+    let verified = {
+        let _locked = Unreadable::around(&path);
+        store.verify(&reference).await
+    };
+    assert!(
+        matches!(verified, Err(BlobStoreError::Unavailable(_))),
+        "a refused read is a storage fault, got {verified:?}"
+    );
+
+    std::fs::remove_file(&path).expect("the object can be removed in the test");
+    assert!(
+        matches!(store.verify(&reference).await, Err(BlobStoreError::Missing)),
+        "an absent object is missing"
+    );
 }

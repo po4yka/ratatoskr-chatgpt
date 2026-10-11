@@ -19,7 +19,7 @@ use crate::reparse::{
 };
 use crate::{
     AcquisitionMode, ArchiveInspector, ArchiveLimits, BlobStore, ParsedConversations,
-    ParserExecutionInput, ParserRegistry,
+    ParserExecutionError, ParserExecutionInput, ParserRegistry,
 };
 
 /// Restart-safe executor for raw archives whose receipt transaction reached `stored`.
@@ -354,7 +354,7 @@ const fn is_permanent_import_error(error: &ReparseError) -> bool {
         error,
         ReparseError::Conflict
             | ReparseError::Intake(_)
-            | ReparseError::Parser(_)
+            | ReparseError::Parser(ParserExecutionError::Failed)
             | ReparseError::Encode(_)
             | ReparseError::Report(_)
             | ReparseError::Blob(

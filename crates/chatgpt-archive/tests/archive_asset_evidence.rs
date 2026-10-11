@@ -16,7 +16,7 @@ use bytes::Bytes;
 use ratatoskr_chatgpt_archive::{
     AcquisitionMode, ArchiveInventory, ArtifactProvenance, AssetAvailability, BlobStore,
     ExtractedArtifact, ParserRegistry, ParserSelection, SyntheticArchiveInput,
-    SyntheticConversationsParser,
+    SyntheticConversationsParser, SyntheticParserError,
 };
 
 const CONVERSATIONS: &[u8] = include_bytes!("fixtures/synthetic_archive_conversations.json");
@@ -324,4 +324,44 @@ async fn a_malformed_assets_json_is_a_parser_failure() {
     .await;
 
     assert!(outcome.is_err(), "a malformed declaration never imports");
+}
+
+/// A storage fault while a declared file is verified is not evidence about the file: it must
+/// surface as an error the importer can retry, never as a `BlobVerificationFailed` anomaly that
+/// is frozen into a completed or partial import (XR-021 CONTRACTS.md R3-04 rule 2).
+#[tokio::test]
+async fn a_storage_fault_while_verifying_a_declared_file_is_an_error_not_an_anomaly() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let store_root = tempfile::tempdir().expect("temporary blob root");
+    let store = BlobStore::new(store_root.path()).expect("blob store");
+    let selected = selected_parser();
+    let artifacts = extracted_note(&store).await;
+    let directory = store
+        .resolve(&artifacts[0].blob)
+        .expect("the stored note resolves")
+        .parent()
+        .expect("an object lives in a directory")
+        .to_path_buf();
+    let input = SyntheticArchiveInput::new(
+        &selected,
+        CONVERSATIONS,
+        Some(PROJECTS),
+        Some(CANVAS),
+        Some(ASSETS),
+        &artifacts,
+        &store,
+    );
+
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o000))
+        .expect("the object directory can be locked in the test");
+    let outcome = SyntheticConversationsParser.parse_archive(&input).await;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+        .expect("the object directory can be unlocked in the test");
+
+    assert_eq!(
+        outcome.map(|parsed| parsed.assets.iter().map(|a| a.anomaly).collect::<Vec<_>>()),
+        Err(SyntheticParserError::StorageUnavailable),
+        "a refused read is not an asset anomaly"
+    );
 }

@@ -16,9 +16,9 @@ pub use model::{
 
 use crate::receipt::AcquisitionMode;
 use crate::{
-    ArtifactProvenance, BlobStore, EntryKind, ExtractedArtifact, ParserArtifactEvidence,
-    ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserFuture, ParserId,
-    ParserRegistration,
+    ArtifactProvenance, BlobStore, BlobStoreError, EntryKind, ExtractedArtifact,
+    ParserArtifactEvidence, ParserExecutionError, ParserExecutionInput, ParserExecutor,
+    ParserFuture, ParserId, ParserRegistration,
 };
 
 /// All immutable evidence available to the synthetic archive parser.
@@ -73,6 +73,10 @@ pub enum SyntheticParserError {
     /// The document does not match the documented synthetic shape.
     #[error("synthetic conversations document is invalid")]
     InvalidDocument,
+    /// The blob store failed while a declared file was being verified. Nothing is known about the
+    /// document, so the caller retries rather than recording a finding.
+    #[error("the blob store was unavailable while verifying a declared file")]
+    StorageUnavailable,
 }
 
 /// Parser for the documented synthetic conversations shape.
@@ -120,7 +124,12 @@ impl SyntheticConversationsParser {
             input.blobs,
         ))
         .await
-        .map_err(|_| ParserExecutionError::Failed)
+        .map_err(|error| match error {
+            SyntheticParserError::StorageUnavailable => ParserExecutionError::Storage,
+            SyntheticParserError::UnexpectedSelection | SyntheticParserError::InvalidDocument => {
+                ParserExecutionError::Failed
+            }
+        })
     }
 }
 
@@ -145,7 +154,12 @@ async fn extract_entries(
                 futures_util::stream::iter([Ok::<_, std::io::Error>(artifact.bytes.clone())]),
             )
             .await
-            .map_err(|_| ParserExecutionError::Failed)?;
+            .map_err(|error| match error {
+                BlobStoreError::Unavailable(_) | BlobStoreError::Stream(_) => {
+                    ParserExecutionError::Storage
+                }
+                _ => ParserExecutionError::Failed,
+            })?;
         extracted.push(ExtractedArtifact {
             blob,
             provenance: ArtifactProvenance {

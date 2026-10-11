@@ -668,6 +668,9 @@ pub(crate) async fn persist_artifacts(
 
 /// Persists the projects, conversation rows, revisions and the normalized detail of
 /// every conversation that is new or changed in this plan.
+// TODO(author): a single-export reparse of an export that is not the newest observer of a record
+// writes its older content into the shared row until a newer export is reparsed. When the
+// reparsed export is not the newest observer, update only its own observation and snapshot.
 pub(crate) async fn persist_projection(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &ReparsePlan,

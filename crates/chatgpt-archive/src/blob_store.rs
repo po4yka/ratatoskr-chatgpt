@@ -199,6 +199,16 @@ impl LocalFsBackend {
     }
 }
 
+/// Classifies a failed read. An object that is not there reads as missing; any other failure
+/// (a refused read, a device error) says nothing about the object, so it is the retryable
+/// storage fault and never "missing" (XR-021 CONTRACTS.md R3-04 rule 2).
+fn read_failure(error: std::io::Error) -> BlobStoreError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => BlobStoreError::Missing,
+        _ => BlobStoreError::Unavailable(error),
+    }
+}
+
 impl BlobBackend for LocalFsBackend {
     fn receive(
         &self,
@@ -299,23 +309,16 @@ impl BlobBackend for LocalFsBackend {
         Box::pin(async move {
             use tokio::io::AsyncReadExt as _;
 
-            let metadata = tokio::fs::metadata(&path)
-                .await
-                .map_err(|_| BlobStoreError::Missing)?;
+            let metadata = tokio::fs::metadata(&path).await.map_err(read_failure)?;
             if !metadata.is_file() || metadata.len() != expected_length {
                 return Err(BlobStoreError::Missing);
             }
 
-            let mut file = tokio::fs::File::open(&path)
-                .await
-                .map_err(|_| BlobStoreError::Missing)?;
+            let mut file = tokio::fs::File::open(&path).await.map_err(read_failure)?;
             let mut hasher = sha2::Sha256::new();
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
-                let read = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|_| BlobStoreError::Missing)?;
+                let read = file.read(&mut buffer).await.map_err(read_failure)?;
                 if read == 0 {
                     break;
                 }
@@ -334,10 +337,10 @@ impl BlobBackend for LocalFsBackend {
 
     fn locate(&self, reference: &BlobRef) -> Result<PathBuf, BlobStoreError> {
         let path = self.content_path(reference)?;
-        if path.is_file() {
-            Ok(path)
-        } else {
-            Err(BlobStoreError::Missing)
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => Ok(path),
+            Ok(_) => Err(BlobStoreError::Missing),
+            Err(error) => Err(read_failure(error)),
         }
     }
 
