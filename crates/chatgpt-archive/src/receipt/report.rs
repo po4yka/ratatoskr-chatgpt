@@ -4,7 +4,7 @@ use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 use ratatoskr_ai_archive_contracts::{
     AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
 };
-use ratatoskr_error_contracts::{ErrorCode, ErrorEnvelope};
+use ratatoskr_error_contracts::{ErrorCode, ErrorEnvelope, WarningEnvelope};
 use ratatoskr_identifiers::SafeMessage;
 use ratatoskr_identifiers::{AiArchiveId, EntityRef, Extensions, OperationId};
 use ratatoskr_operation_contracts::{
@@ -12,6 +12,24 @@ use ratatoskr_operation_contracts::{
 };
 
 use super::repository::{PlatformOperation, RepositoryError};
+
+/// Warning code for facts left out because their envelope exceeds the configured limit.
+pub(crate) const FACTS_TOO_LARGE_WARNING_CODE: &str = "ai_archive.facts.too_large";
+
+/// User-safe message of the too-large warning.
+const FACTS_TOO_LARGE_WARNING_MESSAGE: &str =
+    "Some conversations are too large to add to the library.";
+
+/// The warning that tells the user a fact never reached the library (XR-021 CONTRACTS.md R2-04
+/// rule 4). It carries no field path and no count, so it discloses nothing about content.
+fn facts_too_large_warning() -> Result<WarningEnvelope, RepositoryError> {
+    Ok(WarningEnvelope {
+        code: ErrorCode::parse(FACTS_TOO_LARGE_WARNING_CODE).map_err(invalid_contract)?,
+        message: SafeMessage::parse(FACTS_TOO_LARGE_WARNING_MESSAGE).map_err(invalid_contract)?,
+        field_path: None,
+        extensions: Extensions::new(),
+    })
+}
 
 /// Evidence-based counts produced by one completed import.
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +40,9 @@ pub(crate) struct ImportSummary {
     pub(crate) asset_count: u32,
     pub(crate) gap_count: u32,
     pub(crate) warning_count: u32,
+    /// How many facts were not enqueued because their envelope exceeded the configured limit
+    /// (XR-021 CONTRACTS.md R2-04 rule 4).
+    pub(crate) facts_too_large: u32,
 }
 
 /// Produces the terminal Platform result after normalized import truth exists.
@@ -35,11 +56,21 @@ pub(crate) fn imported(
         OperationId::parse(&operation.operation_id.to_string()).map_err(invalid_contract)?;
     let provider = AiProvider::parse("chatgpt").map_err(invalid_contract)?;
     let result_kind = OperationResultKind::parse("ai_archive.import").map_err(invalid_contract)?;
-    let status = if summary.completeness == AiArchiveCompleteness::Complete {
-        OperationStatus::Succeeded
-    } else {
+    let incomplete = summary.completeness != AiArchiveCompleteness::Complete;
+    let status = if incomplete || summary.facts_too_large > 0 {
         OperationStatus::PartiallySucceeded
+    } else {
+        OperationStatus::Succeeded
     };
+    // A partial success without a diagnostic is invalid (S06 D3): an incomplete import carries
+    // exactly the contract warning, and a left-out fact carries exactly its own, never an error.
+    let mut warnings = Vec::new();
+    if incomplete {
+        warnings.push(incomplete_import_warning());
+    }
+    if summary.facts_too_large > 0 {
+        warnings.push(facts_too_large_warning()?);
+    }
     let report = OperationReported {
         operation_id,
         status,
@@ -62,13 +93,7 @@ pub(crate) fn imported(
             extensions: Extensions::new(),
         }],
         error: None,
-        // A partial success without a diagnostic is invalid (S06 D3): an incomplete
-        // import carries exactly the contract warning and no error.
-        warnings: if status == OperationStatus::PartiallySucceeded {
-            vec![incomplete_import_warning()]
-        } else {
-            Vec::new()
-        },
+        warnings,
         extensions: Extensions::new(),
     };
     Ok(report)
@@ -118,6 +143,7 @@ mod tests {
             asset_count: 0,
             gap_count: u32::from(completeness != AiArchiveCompleteness::Complete),
             warning_count: 0,
+            facts_too_large: 0,
         }
     }
 
@@ -144,6 +170,55 @@ mod tests {
         report
             .validate()
             .expect("an incomplete import must satisfy the report invariant");
+    }
+
+    fn report_with_too_large(
+        completeness: AiArchiveCompleteness,
+    ) -> ratatoskr_operation_contracts::OperationReported {
+        imported(
+            PlatformOperation {
+                operation_id: Uuid::now_v7(),
+            },
+            Uuid::now_v7(),
+            ImportSummary {
+                facts_too_large: 2,
+                ..summary(completeness)
+            },
+        )
+        .expect("the report builds from valid identities")
+    }
+
+    fn codes(report: &ratatoskr_operation_contracts::OperationReported) -> Vec<&str> {
+        report
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_complete_import_with_a_fact_too_large_is_partial_with_one_warning() {
+        let report = report_with_too_large(AiArchiveCompleteness::Complete);
+
+        assert_eq!(report.status, OperationStatus::PartiallySucceeded);
+        assert_eq!(codes(&report), ["ai_archive.facts.too_large"]);
+        assert!(report.error.is_none());
+        report
+            .validate()
+            .expect("a partial success with a warning is valid");
+    }
+
+    #[test]
+    fn an_incomplete_import_with_a_fact_too_large_carries_both_warnings_once() {
+        let report = report_with_too_large(AiArchiveCompleteness::StructurallyPartial);
+
+        assert_eq!(report.status, OperationStatus::PartiallySucceeded);
+        assert_eq!(
+            codes(&report),
+            ["ai_archive.import.incomplete", "ai_archive.facts.too_large"],
+            "exactly one warning of each code, the incomplete-import warning first"
+        );
+        report.validate().expect("both warnings are valid");
     }
 
     #[test]

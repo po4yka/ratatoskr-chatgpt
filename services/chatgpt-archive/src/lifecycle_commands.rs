@@ -83,7 +83,8 @@ async fn run_reparse(
         Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
     )
-    .with_platform_users(config.receipt.platform_accounts.clone());
+    .with_platform_users(config.receipt.platform_accounts.clone())
+    .with_max_event_bytes(config.receipt.max_event_bytes);
     let plan = engine
         .plan(
             command.tenant_id,
@@ -118,7 +119,8 @@ async fn run_parser_migrate(
         Arc::new(ParserRegistry::runtime()?),
         (&config.limits).into(),
     )
-    .with_platform_users(config.receipt.platform_accounts.clone());
+    .with_platform_users(config.receipt.platform_accounts.clone())
+    .with_max_event_bytes(config.receipt.max_event_bytes);
     let engine = ParserMigrationEngine::new(reparse);
     let plan = engine
         .plan(Uuid::now_v7(), command.tenant_id, command.parser.clone())

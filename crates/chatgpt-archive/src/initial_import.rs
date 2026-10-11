@@ -30,6 +30,7 @@ pub struct InitialImportWorker {
     registry: Arc<ParserRegistry>,
     limits: ArchiveLimits,
     owners: OwnerResolver,
+    max_event_bytes: u64,
 }
 
 impl InitialImportWorker {
@@ -47,6 +48,7 @@ impl InitialImportWorker {
             registry,
             limits,
             owners: OwnerResolver::default(),
+            max_event_bytes: crate::config::DEFAULT_MAX_EVENT_BYTES,
         }
     }
 
@@ -58,6 +60,16 @@ impl InitialImportWorker {
     #[must_use]
     pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
         self.owners = OwnerResolver::new(platform_accounts);
+        self
+    }
+
+    /// Sets the largest serialized `ai_archive.*` envelope this worker enqueues.
+    ///
+    /// A fact above the limit is not enqueued and the import says so (XR-021 CONTRACTS.md R2-04
+    /// rule 4). The default is [`crate::config::DEFAULT_MAX_EVENT_BYTES`].
+    #[must_use]
+    pub fn with_max_event_bytes(mut self, max_event_bytes: u64) -> Self {
+        self.max_event_bytes = max_event_bytes;
         self
     }
 
@@ -267,10 +279,24 @@ impl InitialImportWorker {
         .bind(&plan.parsed.schema_id)
         .execute(&mut *tx)
         .await?;
-        // Facts first, in the transaction that persisted the rows they are read from:
-        // by the time Platform sees the operation finish, they are already queued.
-        project_import_facts(
-            &mut tx,
+        self.project_and_report(&mut tx, run_id, archive_id, plan, summary)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Facts first, in the transaction that persisted the rows they are read from: by the time
+    /// Platform sees the operation finish, they are already queued.
+    async fn project_and_report(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        run_id: Uuid,
+        archive_id: Uuid,
+        plan: &ReparsePlan,
+        summary: crate::receipt::report::ImportSummary,
+    ) -> Result<(), ReparseError> {
+        let projected = project_import_facts(
+            tx,
             &self.owners,
             &FactScope {
                 archive_id,
@@ -278,11 +304,28 @@ impl InitialImportWorker {
                 account_id: plan.tenant_id,
                 parser: &plan.parsed.parser,
                 head: HeadPolicy::Always,
+                max_event_bytes: self.max_event_bytes,
             },
         )
         .await?;
+        // The terminal report is built in this transaction, from this projection, so a fact that
+        // was left out is reported with the import and never silently lost. The count is also
+        // stored with the completeness report for a late Platform correlation.
+        sqlx::query(
+            "UPDATE chatgpt_archive.completeness_reports
+             SET counts = counts || jsonb_build_object('facts_too_large', $2::bigint)
+             WHERE import_run_id = $1",
+        )
+        .bind(run_id)
+        .bind(i64::from(projected.too_large))
+        .execute(&mut **tx)
+        .await?;
+        let summary = crate::receipt::report::ImportSummary {
+            facts_too_large: projected.too_large,
+            ..summary
+        };
         enqueue_operation_reports_in(
-            &mut tx,
+            tx,
             run_id,
             plan.export_id,
             archive_id,
@@ -290,7 +333,6 @@ impl InitialImportWorker {
             summary,
         )
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 }
@@ -443,6 +485,7 @@ fn import_summary(
         asset_count: u32::try_from(stored_assets).unwrap_or(u32::MAX),
         gap_count: u32::try_from(gap_entries).unwrap_or(u32::MAX),
         warning_count: 0,
+        facts_too_large: 0,
     }
 }
 
@@ -479,6 +522,7 @@ async fn load_import_summary(
         warning_count: warnings
             .as_array()
             .map_or(0, |values| u32::try_from(values.len()).unwrap_or(u32::MAX)),
+        facts_too_large: count("facts_too_large"),
     })
 }
 

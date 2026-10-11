@@ -67,6 +67,18 @@ pub(crate) struct FactScope<'a> {
     pub(crate) account_id: Uuid,
     pub(crate) parser: &'a ParserId,
     pub(crate) head: HeadPolicy,
+    /// The largest serialized envelope that may be enqueued (XR-021 CONTRACTS.md R2-04 rule 4).
+    pub(crate) max_event_bytes: u64,
+}
+
+/// What one projection did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ProjectionOutcome {
+    /// Facts newly enqueued.
+    pub(crate) enqueued: usize,
+    /// Facts left out because their envelope exceeds the configured limit. The caller reports
+    /// them in the same transaction so the user is told the truth.
+    pub(crate) too_large: u32,
 }
 
 /// One fact built from rows, with the digest that decides whether it is news.
@@ -76,12 +88,14 @@ struct Candidate {
 }
 
 /// Enqueues the facts of one persisted import, in contract order, and returns how
-/// many rows were added.
+/// many rows were added and how many facts were too large to add.
 ///
 /// Order: `archive.imported`, then each project, then each conversation. An entity
 /// is `added` when no earlier fact exists for its identity, `updated` when its
 /// content digest changed, and absent when it did not. An account without a
-/// Platform mapping emits nothing at all.
+/// Platform mapping emits nothing at all. A fact whose serialized envelope exceeds
+/// `scope.max_event_bytes` is counted and not enqueued: the archive neither truncates nor splits
+/// a conversation.
 ///
 /// # Errors
 ///
@@ -90,7 +104,7 @@ pub(crate) async fn project_import_facts(
     transaction: &mut Tx<'_>,
     owners: &OwnerResolver,
     scope: &FactScope<'_>,
-) -> Result<usize, ProjectionError> {
+) -> Result<ProjectionOutcome, ProjectionError> {
     let Some(owner) = owners
         .owner_of_account(transaction, scope.account_id)
         .await?
@@ -99,7 +113,7 @@ pub(crate) async fn project_import_facts(
             reason = "account_without_platform_mapping",
             "ai_archive facts were not emitted"
         );
-        return Ok(0);
+        return Ok(ProjectionOutcome::default());
     };
     let (import, head_digest) = load_import(transaction, scope, owner).await?;
     let provenance = AiArchiveProvenance::from_import(&import);
@@ -114,8 +128,16 @@ pub(crate) async fn project_import_facts(
         });
     }
     queue.extend(changed);
-    let mut added = 0;
+    let mut outcome = ProjectionOutcome::default();
     for candidate in queue {
+        if serialized_len(&candidate.event)? > scope.max_event_bytes {
+            outcome.too_large = outcome.too_large.saturating_add(1);
+            tracing::warn!(
+                event_type = candidate.event.event_type,
+                "an ai_archive fact exceeds the event size limit and was not enqueued"
+            );
+            continue;
+        }
         let placement = OutboxPlacement {
             account_id: Some(scope.account_id),
             export_id: Some(scope.export_id),
@@ -129,10 +151,16 @@ pub(crate) async fn project_import_facts(
         if crate::Database::enqueue_normalized_event(transaction, &candidate.event, &placement)
             .await?
         {
-            added += 1;
+            outcome.enqueued += 1;
         }
     }
-    Ok(added)
+    Ok(outcome)
+}
+
+/// The size of the envelope exactly as the outbox row stores it and the pump relays it.
+fn serialized_len(event: &NormalizedArchiveEvent) -> Result<u64, ProjectionError> {
+    let bytes = serde_json::to_vec(&event.envelope)?;
+    Ok(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
 }
 
 async fn load_import(

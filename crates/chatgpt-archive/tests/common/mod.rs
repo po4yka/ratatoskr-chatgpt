@@ -200,6 +200,18 @@ pub(crate) async fn receive_export(
     account_ref: &str,
     bytes: Vec<u8>,
 ) -> Received {
+    receive_export_for(pool, blobs, account_ref, bytes, None).await
+}
+
+/// Like [`receive_export`], for an archive that arrived through the Platform receipt and so
+/// carries the operation whose terminal report the import owes.
+pub(crate) async fn receive_export_for(
+    pool: &sqlx::PgPool,
+    blobs: &ratatoskr_chatgpt_archive::BlobStore,
+    account_ref: &str,
+    bytes: Vec<u8>,
+    platform_operation: Option<ratatoskr_chatgpt_archive::receipt::PlatformOperation>,
+) -> Received {
     use ratatoskr_chatgpt_archive::receipt::AcquisitionMode;
     use ratatoskr_chatgpt_archive::receipt::pg::PostgresReceiptRepository;
     use ratatoskr_chatgpt_archive::receipt::repository::{PublishRequest, ReceiptRepository as _};
@@ -233,7 +245,7 @@ pub(crate) async fn receive_export(
             blob_ref_json: serde_json::to_value(&raw).expect("a blob reference encodes"),
             sha256_hex: digest,
             byte_length: length,
-            platform_operation: None,
+            platform_operation,
         })
         .await
         .expect("the export is published");

@@ -14,8 +14,8 @@
 
 ## 4. Size guard, undeliverable rows and honest reports (R2-04)
 
-- [ ] 4.1 RED: `crates/chatgpt-archive/tests/contract_projection.rs` `a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial` fails because the oversized fact is enqueued and the report is `succeeded`; `tests/normalized_events.rs` `an_undeliverable_row_does_not_wedge_the_pump` fails because the pass returns an error and the row is retried; `transient_refusals_never_make_a_row_undeliverable` pins the other class.
-- [ ] 4.2 GREEN: `RATATOSKR__RECEIPT__MAX_EVENT_BYTES`, the guard in `build_import_facts` and the report assembly, `outbox_events.undeliverable_at`, the `max_payload` comparison in `publish_row`, skipping undeliverable rows, and the counter.
+- [x] 4.1 RED: `crates/chatgpt-archive/tests/contract_projection.rs` `a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial` fails because the oversized fact is enqueued (three facts instead of two); `tests/normalized_events.rs` `an_undeliverable_row_does_not_wedge_the_pump` fails because the pass returns a `Broker(MaxPayloadExceeded)` error; `tests/config.rs` `max_event_bytes_defaults_and_is_bounded` fails because the key is not recognized. `transient_refusals_never_make_a_row_undeliverable` and `facts_under_the_event_limit_report_no_too_large_warning` pin negatives that already held, so they passed in the RED run. The four unit tests in `receipt/report.rs` were written beside a signature-only field stub and were not run red on their own; the integration test above covers the same behaviour end to end and was seen red.
+- [x] 4.2 GREEN: `RATATOSKR__RECEIPT__MAX_EVENT_BYTES`, the guard in `build_import_facts` and the report assembly, `outbox_events.undeliverable_at`, the `max_payload` comparison in `publish_row`, skipping undeliverable rows, and the counter.
 
 ## 5. Blob lock protocol (R2-07)
 

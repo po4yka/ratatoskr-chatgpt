@@ -11,6 +11,11 @@ use sqlx::Row as _;
 
 /// Subject Platform consumes to project producer operation facts.
 const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.chatgpt.operation.reported.v1";
+/// Room kept below the broker's `max_payload` for headers and framing (XR-021 CONTRACTS.md R2-04
+/// rule 2).
+const PAYLOAD_HEADROOM_BYTES: usize = 1024;
+/// The safe failure class stored for a row that can never be delivered.
+const CLASS_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 const BATCH_SIZE: i64 = 32;
 const MAX_BACKOFF_SECONDS: i32 = 300;
 
@@ -78,7 +83,10 @@ impl ArchiveEventOutbox {
     /// crash after acknowledgement but before the SQL update redelivers a message
     /// the stream collapses. A row the broker did not acknowledge stays unpublished,
     /// records a safe failure class and waits out a bounded backoff, so one refused
-    /// row never starves the rows behind it.
+    /// row never starves the rows behind it. A transient failure never gives a row
+    /// up. A row larger than the connected server accepts can never be delivered: it
+    /// is marked undeliverable at once, skipped from then on, counted, and does not
+    /// fail the pass, so it neither wedges the pump nor flips readiness.
     ///
     /// # Errors
     ///
@@ -93,7 +101,8 @@ impl ArchiveEventOutbox {
     ) -> Result<usize, PublishError> {
         let rows = sqlx::query(
             "SELECT id, event_type, payload FROM chatgpt_archive.outbox_events
-             WHERE published_at IS NULL AND next_attempt_at <= now()
+             WHERE published_at IS NULL AND undeliverable_at IS NULL
+               AND next_attempt_at <= now()
              ORDER BY id LIMIT $1",
         )
         .bind(BATCH_SIZE)
@@ -101,6 +110,11 @@ impl ArchiveEventOutbox {
         .await
         .map_err(PublishError::Database)?;
 
+        let deliverable_bytes = jetstream
+            .client()
+            .server_info()
+            .max_payload
+            .saturating_sub(PAYLOAD_HEADROOM_BYTES);
         let mut published = 0;
         let mut first_failure = None;
         for row in rows {
@@ -111,6 +125,10 @@ impl ArchiveEventOutbox {
             let subject =
                 subject_for_event_type(&event_type).ok_or(PublishError::UnknownEventType)?;
             let body = stored_envelope_bytes(&event_type, &payload)?;
+            if body.len() > deliverable_bytes {
+                self.mark_undeliverable(id).await?;
+                continue;
+            }
             match publish_row(jetstream, subject, id, body).await {
                 Ok(()) => {
                     self.mark_published(id).await?;
@@ -134,6 +152,33 @@ impl ArchiveEventOutbox {
         .execute(&self.pool)
         .await
         .map_err(PublishError::Database)?;
+        Ok(())
+    }
+
+    /// A permanent failure: the row is kept as evidence and never retried. The log and the
+    /// counter carry the class only, never the event type's content.
+    async fn mark_undeliverable(&self, id: i64) -> Result<(), PublishError> {
+        let marked = sqlx::query(
+            "UPDATE chatgpt_archive.outbox_events
+             SET undeliverable_at = now(), last_error = $2
+             WHERE id = $1 AND published_at IS NULL AND undeliverable_at IS NULL",
+        )
+        .bind(id)
+        .bind(CLASS_PAYLOAD_TOO_LARGE)
+        .execute(&self.pool)
+        .await
+        .map_err(PublishError::Database)?;
+        if marked.rows_affected() > 0 {
+            metrics::counter!(
+                "chatgpt_archive_outbox_undeliverable_total",
+                "class" => CLASS_PAYLOAD_TOO_LARGE
+            )
+            .increment(1);
+            tracing::warn!(
+                class = CLASS_PAYLOAD_TOO_LARGE,
+                "an archive event is larger than the broker accepts and will not be retried"
+            );
+        }
         Ok(())
     }
 

@@ -263,6 +263,10 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     attempt_count   INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- A permanent delivery failure (the envelope is larger than the broker accepts). The row is
+    -- kept as evidence, never retried, and never makes the service not ready (XR-021
+    -- CONTRACTS.md R2-04 rule 2). A transient failure never sets this column.
+    undeliverable_at TIMESTAMPTZ,
     -- The payload is always the complete event envelope. The publisher maps the type to a
     -- subject through a closed table, so a type outside this list could never be delivered.
     CONSTRAINT outbox_event_type_closed CHECK (event_type IN (
@@ -286,6 +290,8 @@ ALTER TABLE chatgpt_archive.outbox_events
     ADD COLUMN IF NOT EXISTS tenant_id UUID;
 ALTER TABLE chatgpt_archive.outbox_events
     ADD COLUMN IF NOT EXISTS export_id UUID;
+ALTER TABLE chatgpt_archive.outbox_events
+    ADD COLUMN IF NOT EXISTS undeliverable_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_deduplication_key_unique
     ON chatgpt_archive.outbox_events (deduplication_key)

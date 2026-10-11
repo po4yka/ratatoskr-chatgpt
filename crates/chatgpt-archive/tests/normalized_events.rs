@@ -431,3 +431,130 @@ async fn a_refused_row_backs_off_without_starving_the_rows_behind_it() {
     let _ = jetstream.delete_stream(STREAM).await;
     database.discard().await;
 }
+
+// ---- permanent and transient delivery failures (XR-021 CONTRACTS.md R2-04 rule 2) ----
+
+/// A tombstone row whose stored envelope is padded to at least `bytes` bytes. The padding sits in
+/// the payload, which the pump relays unchanged, so the row is a valid envelope of its type that
+/// no broker with this limit can accept.
+async fn enqueue_padded_tombstone(pool: &sqlx::PgPool, bytes: usize) {
+    enqueue(
+        pool,
+        &NormalizedArchiveEvent::tombstoned(&tombstone(r#"{"subject_kind":"archive"}"#))
+            .expect("a valid tombstone encodes"),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE chatgpt_archive.outbox_events
+         SET payload = jsonb_set(payload, '{payload,padding}', to_jsonb(repeat('x', $1)))
+         WHERE id = (SELECT max(id) FROM chatgpt_archive.outbox_events)",
+    )
+    .bind(i32::try_from(bytes).expect("a test padding fits in i32"))
+    .execute(pool)
+    .await
+    .expect("the row is padded");
+}
+
+#[tokio::test]
+async fn an_undeliverable_row_does_not_wedge_the_pump() {
+    let _guard = stream_guard().await;
+    let database = common::DisposableDatabase::create().await;
+    let client = async_nats::connect(common::nats_url())
+        .await
+        .expect("the test broker accepts connections");
+    let limit = client.server_info().max_payload;
+    let jetstream = async_nats::jetstream::new(client);
+    let mut stream = fresh_events_stream(&jetstream).await;
+    let small = NormalizedArchiveEvent::tombstoned(&tombstone(r#"{"subject_kind":"archive"}"#))
+        .expect("a valid tombstone encodes");
+    enqueue(database.pool(), &small).await;
+    enqueue_padded_tombstone(database.pool(), limit).await;
+    enqueue(database.pool(), &small).await;
+    let seed = seed_file();
+
+    let pump = pump(database.pool());
+    let first = pump
+        .publish_pending_once(&common::nats_url(), seed.path())
+        .await
+        .expect("an undeliverable row is not a failed pass, so readiness stays true");
+    assert_eq!(
+        first, 2,
+        "the rows on both sides of the large one are published"
+    );
+    let second = pump
+        .publish_pending_once(&common::nats_url(), seed.path())
+        .await
+        .expect("the large row is skipped from now on");
+    assert_eq!(second, 0);
+
+    let rows: Vec<(i64, bool, i32, Option<String>, bool)> = sqlx::query_as(
+        "SELECT id, published_at IS NOT NULL, attempt_count, last_error,
+                undeliverable_at IS NOT NULL
+         FROM chatgpt_archive.outbox_events ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("the outbox is readable");
+    assert_eq!(
+        rows,
+        [
+            (1, true, 0, None, false),
+            (2, false, 0, Some("payload_too_large".to_owned()), true),
+            (3, true, 0, None, false),
+        ],
+        "the large row is marked undeliverable with a safe class; no attempt is recorded for a \
+         publish that was never made"
+    );
+    assert_eq!(stream.info().await.expect("stream info").state.messages, 2);
+    let _ = jetstream.delete_stream(STREAM).await;
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn transient_refusals_never_make_a_row_undeliverable() {
+    let _guard = stream_guard().await;
+    let database = common::DisposableDatabase::create().await;
+    let client = async_nats::connect(common::nats_url())
+        .await
+        .expect("the test broker accepts connections");
+    let jetstream = async_nats::jetstream::new(client);
+    // No stream takes the head's subject, so the broker never acknowledges it: the same shape as
+    // an unreachable broker or a permission denial.
+    let stream = stream_over(
+        &jetstream,
+        vec!["evt.ai_archive.subject.tombstoned.v1".to_owned()],
+    )
+    .await;
+    let head: AiArchiveImport = serde_json::from_str(IMPORT).expect("the head fixture parses");
+    enqueue(
+        database.pool(),
+        &NormalizedArchiveEvent::archive_imported(&head).expect("the head encodes"),
+    )
+    .await;
+    let seed = seed_file();
+
+    let outcome = pump(database.pool())
+        .publish_pending_once(&common::nats_url(), seed.path())
+        .await;
+
+    assert!(outcome.is_err(), "a transient refusal fails the pass");
+    let undeliverable: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM chatgpt_archive.outbox_events WHERE undeliverable_at IS NOT NULL",
+    )
+    .fetch_one(database.pool())
+    .await
+    .expect("the outbox is readable");
+    assert_eq!(undeliverable, 0, "a refusal is retried, never given up on");
+    let (attempts, last_error): (i32, Option<String>) =
+        sqlx::query_as("SELECT attempt_count, last_error FROM chatgpt_archive.outbox_events")
+            .fetch_one(database.pool())
+            .await
+            .expect("the row is readable");
+    assert_eq!(
+        (attempts, last_error.as_deref()),
+        (1, Some("not_acknowledged"))
+    );
+    drop(stream);
+    let _ = jetstream.delete_stream(STREAM).await;
+    database.discard().await;
+}

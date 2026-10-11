@@ -468,3 +468,45 @@ fn receipt_listener_defaults_and_validation() {
         "the violation names both keys: {error}"
     );
 }
+
+/// XR-021 CONTRACTS.md R2-04 rule 4: the enqueue-time size guard defaults to 8000000 bytes and
+/// accepts 65536 through 8388608, the broker ceiling the platform configuration sets.
+#[test]
+fn max_event_bytes_defaults_and_is_bounded() {
+    let blob = ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs");
+    let config = Config::from_environment(entries(&[blob])).expect("defaults must load");
+    assert_eq!(config.receipt.max_event_bytes, 8_000_000);
+
+    for (accepted, expected) in [
+        ("65536", 65_536),
+        ("8388608", 8_388_608),
+        ("1000000", 1_000_000),
+    ] {
+        let config = Config::from_environment(entries(&[
+            blob,
+            ("RATATOSKR__RECEIPT__MAX_EVENT_BYTES", accepted),
+        ]))
+        .expect("a value inside the range must load");
+        assert_eq!(config.receipt.max_event_bytes, expected);
+    }
+
+    // "0" is left out of the value-free check below: the rule text names 8388608.
+    for refused in ["65535", "8388609", "-1", "many", "0"] {
+        let error = Config::from_environment(entries(&[
+            blob,
+            ("RATATOSKR__RECEIPT__MAX_EVENT_BYTES", refused),
+        ]))
+        .expect_err("a value outside the range must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__MAX_EVENT_BYTES"),
+            "the violation names the key: {error}"
+        );
+        assert!(
+            refused == "0" || !error.to_string().contains(refused),
+            "the supplied value is never rendered"
+        );
+    }
+}

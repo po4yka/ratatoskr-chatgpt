@@ -15,7 +15,7 @@ mod common;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use common::{DisposableDatabase, archive_limits, drain, receive_export};
+use common::{DisposableDatabase, archive_limits, drain, receive_export, receive_export_for};
 use ratatoskr_ai_archive_contracts::{
     AiArchiveImport, AiAuthorRole, AiContentPart, AiConversationAdded, AiConversationUpdated,
     AiProjectAdded,
@@ -381,5 +381,173 @@ async fn a_reparse_adds_a_fact_only_for_content_that_changed() {
         "0.3.0",
         "the fact names the parser that produced it"
     );
+    database.discard().await;
+}
+
+// ---- the enqueue-time size guard (XR-021 CONTRACTS.md R2-04 rule 4) ----
+
+/// A synthetic export with a small conversation and one whose single message is `big_text`.
+fn small_and_big_zip(big_text: &str) -> Vec<u8> {
+    let conversation = |id: &str, text: &str| {
+        serde_json::json!({
+            "id": id,
+            "title": id,
+            "mapping": {
+                (format!("{id}-m1")): {"id": format!("{id}-m1"), "parent": null, "message": {
+                    "id": format!("{id}-m1"), "author": {"role": "user"}, "content": {"parts": [text]}}}
+            }
+        })
+    };
+    let document = serde_json::json!([
+        conversation("small", "short question"),
+        conversation("big", big_text),
+    ]);
+    common::zip_of(&[("conversations.json", document.to_string().as_bytes())])
+}
+
+/// The terminal operation reports queued for `operation`, as the contract type.
+async fn operation_reports(
+    database: &DisposableDatabase,
+) -> Vec<ratatoskr_operation_contracts::OperationReported> {
+    let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT payload FROM chatgpt_archive.outbox_events
+         WHERE event_type = 'platform.operation.reported.v1' ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("the outbox is readable");
+    rows.into_iter()
+        .map(|payload| {
+            let envelope: EventEnvelope =
+                serde_json::from_value(payload).expect("a stored row is an envelope");
+            envelope.payload_as().expect("the report round-trips")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial() {
+    use ratatoskr_operation_contracts::OperationStatus;
+
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let account_ref = format!("acc-{}", Uuid::now_v7());
+    let operation_id = Uuid::now_v7();
+    // About 40000 characters of text make the big conversation's envelope far larger than the
+    // limit below, and the small conversation's envelope far smaller. The words differ so the
+    // archive stays under the intake compression-ratio limit.
+    let big_text = (0..6_000)
+        .map(|index| format!("w{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    receive_export_for(
+        database.pool(),
+        &blobs,
+        &account_ref,
+        small_and_big_zip(&big_text),
+        Some(ratatoskr_chatgpt_archive::receipt::PlatformOperation { operation_id }),
+    )
+    .await;
+
+    drain(&worker(&database, &blobs, mapping(&account_ref)).with_max_event_bytes(16_384)).await;
+
+    let facts = facts(&database).await;
+    assert_eq!(
+        types(&facts),
+        [
+            "ai_archive.archive.imported.v1",
+            "ai_archive.conversation.added.v1",
+        ],
+        "the head and the small conversation are enqueued; the large one is not"
+    );
+    let added: AiConversationAdded = facts[1].1.payload_as().expect("the conversation decodes");
+    assert_eq!(
+        added
+            .conversation
+            .external_conversation_id
+            .as_ref()
+            .map(ratatoskr_identifiers::EntityLocalId::as_str),
+        Some("small")
+    );
+    for (_, envelope) in &facts {
+        let size = serde_json::to_vec(envelope)
+            .expect("an envelope encodes")
+            .len();
+        assert!(size <= 16_384, "no enqueued fact exceeds the limit: {size}");
+    }
+
+    let reports = operation_reports(&database).await;
+    assert_eq!(
+        reports.len(),
+        1,
+        "one terminal report for the one operation"
+    );
+    let report = &reports[0];
+    assert_eq!(report.operation_id.to_string(), operation_id.to_string());
+    assert_eq!(report.status, OperationStatus::PartiallySucceeded);
+    report
+        .validate()
+        .expect("the report satisfies the contract");
+    let codes: Vec<&str> = report
+        .warnings
+        .iter()
+        .map(|warning| warning.code.as_str())
+        .collect();
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "ai_archive.facts.too_large")
+            .count(),
+        1,
+        "exactly one too-large warning: {codes:?}"
+    );
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| **code == "ai_archive.import.incomplete")
+            .count(),
+        1,
+        "the synthetic export is also incomplete, so exactly one incomplete-import warning stays: {codes:?}"
+    );
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn facts_under_the_event_limit_report_no_too_large_warning() {
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let account_ref = format!("acc-{}", Uuid::now_v7());
+    receive_export_for(
+        database.pool(),
+        &blobs,
+        &account_ref,
+        small_and_big_zip("not so big"),
+        Some(ratatoskr_chatgpt_archive::receipt::PlatformOperation {
+            operation_id: Uuid::now_v7(),
+        }),
+    )
+    .await;
+
+    drain(&worker(&database, &blobs, mapping(&account_ref))).await;
+
+    assert_eq!(
+        types(&facts(&database).await),
+        [
+            "ai_archive.archive.imported.v1",
+            "ai_archive.conversation.added.v1",
+            "ai_archive.conversation.added.v1",
+        ]
+    );
+    for report in operation_reports(&database).await {
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|warning| warning.code.as_str() != "ai_archive.facts.too_large"),
+            "nothing was left out, so nothing is reported as left out"
+        );
+    }
     database.discard().await;
 }

@@ -629,7 +629,8 @@ fn start_initial_import_worker(
         registry,
         (&config.limits).into(),
     )
-    .with_platform_users(config.receipt.platform_accounts.clone());
+    .with_platform_users(config.receipt.platform_accounts.clone())
+    .with_max_event_bytes(config.receipt.max_event_bytes);
     Ok(tokio::spawn(initial_import_loop(worker, ready, stopped)))
 }
 

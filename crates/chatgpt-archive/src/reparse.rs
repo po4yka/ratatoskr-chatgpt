@@ -143,6 +143,7 @@ pub struct ReparseEngine {
     registry: Arc<ParserRegistry>,
     limits: ArchiveLimits,
     owners: OwnerResolver,
+    max_event_bytes: u64,
 }
 
 impl ReparseEngine {
@@ -160,6 +161,7 @@ impl ReparseEngine {
             registry,
             limits,
             owners: OwnerResolver::default(),
+            max_event_bytes: crate::config::DEFAULT_MAX_EVENT_BYTES,
         }
     }
 
@@ -170,6 +172,16 @@ impl ReparseEngine {
     #[must_use]
     pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
         self.owners = OwnerResolver::new(platform_accounts);
+        self
+    }
+
+    /// Sets the largest serialized `ai_archive.*` envelope this worker enqueues.
+    ///
+    /// A fact above the limit is not enqueued and the import says so (XR-021 CONTRACTS.md R2-04
+    /// rule 4). The default is [`crate::config::DEFAULT_MAX_EVENT_BYTES`].
+    #[must_use]
+    pub fn with_max_event_bytes(mut self, max_event_bytes: u64) -> Self {
+        self.max_event_bytes = max_event_bytes;
         self
     }
 
@@ -352,6 +364,7 @@ impl ReparseEngine {
                 account_id: plan.tenant_id,
                 parser: &plan.report.target_parser,
                 head: HeadPolicy::WithChangedEntities,
+                max_event_bytes: self.max_event_bytes,
             },
         )
         .await?;

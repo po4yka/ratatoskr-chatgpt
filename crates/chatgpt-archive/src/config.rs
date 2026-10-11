@@ -17,6 +17,14 @@ use sqlx::postgres::PgConnectOptions;
 
 const ENV_PREFIX: &str = "RATATOSKR__";
 
+/// The default for [`ReceiptConfig::max_event_bytes`]: below the 8 MiB broker `max_payload` the
+/// platform configuration sets, with room for the envelope around a payload.
+pub const DEFAULT_MAX_EVENT_BYTES: u64 = 8_000_000;
+
+/// The accepted range for [`ReceiptConfig::max_event_bytes`]: from a fact that still fits one
+/// small conversation up to the 8 MiB broker `max_payload` itself.
+const MAX_EVENT_BYTES_RANGE: std::ops::RangeInclusive<u64> = 65_536..=8_388_608;
+
 /// Process configuration with finite built-in limits.
 #[derive(Debug, Clone, Serialize)]
 pub struct Config {
@@ -58,6 +66,9 @@ pub struct ReceiptConfig {
     /// Socket address of the loopback receipt listener. XR-021 CONTRACTS.md R2-01 allocates port
     /// 8096 to it, separate from the operator plane.
     pub listen_address: SocketAddr,
+    /// Largest serialized `ai_archive.*` envelope the service enqueues. XR-021 CONTRACTS.md R2-04
+    /// rule 4: a fact above it is not enqueued and the import report says so.
+    pub max_event_bytes: u64,
     /// Bearer tokens that may authenticate a receipt, one per tenant.
     #[serde(skip_serializing)]
     pub tenant_tokens: Vec<TenantToken>,
@@ -76,6 +87,7 @@ impl core::fmt::Debug for ReceiptConfig {
         formatter
             .debug_struct("ReceiptConfig")
             .field("listen_address", &self.listen_address)
+            .field("max_event_bytes", &self.max_event_bytes)
             .field("tenant_tokens", &self.tenant_tokens)
             .field("platform_accounts", &self.platform_accounts)
             .field("event_bus_url", &"[REDACTED]")
@@ -285,6 +297,7 @@ impl Config {
 
 const KEY_LISTEN_ADDRESS: &str = "RATATOSKR__ADMIN__LISTEN_ADDRESS";
 const KEY_RECEIPT_LISTEN_ADDRESS: &str = "RATATOSKR__RECEIPT__LISTEN_ADDRESS";
+const KEY_MAX_EVENT_BYTES: &str = "RATATOSKR__RECEIPT__MAX_EVENT_BYTES";
 const KEY_BLOB_ROOT: &str = "RATATOSKR__STORAGE__BLOB_ROOT";
 const KEY_DATABASE_URL: &str = "RATATOSKR__STORAGE__DATABASE_URL";
 const KEY_LOG_FILTER: &str = "RATATOSKR__TELEMETRY__LOG_FILTER";
@@ -326,6 +339,12 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
             }
             Ok(_) => violations.push(refused("must be a loopback address with a port")),
             Err(_) => violations.push(refused("must be a socket address")),
+        },
+        KEY_MAX_EVENT_BYTES => match value.parse::<u64>() {
+            Ok(parsed) if MAX_EVENT_BYTES_RANGE.contains(&parsed) => {
+                config.receipt.max_event_bytes = parsed;
+            }
+            _ => violations.push(refused("must be an integer from 65536 through 8388608")),
         },
         KEY_BLOB_ROOT => match parse_absolute_path(value) {
             Ok(path) => config.storage.blob_root = Some(path),
@@ -503,6 +522,7 @@ impl Default for Config {
             },
             receipt: ReceiptConfig {
                 listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8096),
+                max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
                 tenant_tokens: Vec::new(),
                 platform_accounts: Vec::new(),
                 event_bus_url: None,
