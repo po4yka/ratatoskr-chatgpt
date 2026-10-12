@@ -88,30 +88,6 @@ Deletion SHALL remove `platform_operation_imports` and `reparse_runs` of the sel
 - **WHEN** an archive that has a `platform_operation_imports` row and a `reparse_runs` row is deleted
 - **THEN** the request completes and both tables hold no row for it
 
-### Requirement: Tombstones are complete envelopes owned by the Platform user
-
-A user-requested deletion SHALL enqueue one `ai_archive.subject.tombstoned.v1` envelope per deleted archive, conversation and project, owned by the Platform user the archive's own announced facts named, with reason `user_requested`. The owner SHALL be read from the announced facts in the outbox inside the row-removal transaction, before the matching rows are removed: the latest `ai_archive.archive.imported.v1` fact of a deleted archive, else the latest announced fact of the account. The live `PLATFORM_ACCOUNTS` mapping SHALL be consulted only when no announced fact gives an owner. An account that announced a fact but yields no owner SHALL emit none and the completion totals SHALL report `downstream_tombstone_unbound`. An account that announced nothing and has no mapping SHALL emit none and SHALL NOT report a gap. A tenant deletion SHALL keep unpublished tombstones of earlier requests. Survivors of the deletion SHALL be announced again under the same owner.
-
-#### Scenario: Archive deletion tombstone
-
-- **WHEN** an archive of a mapped account is deleted
-- **THEN** the outbox row decodes as an `EventEnvelope` whose tenant and payload owner are `user:<Platform user>`, and whose evidence blob exists
-
-#### Scenario: The mapping changed after the import
-
-- **WHEN** an archive was announced under `user:A` and the mapping no longer contains its account, or names another user, and the archive is deleted
-- **THEN** the tombstones name `user:A`, no item fails, and the completion totals hold no `downstream_tombstone_unbound`
-
-#### Scenario: Nothing was announced
-
-- **WHEN** an account with no announced fact and no mapping has an archive deleted
-- **THEN** the deletion completes with no tombstone and no `downstream_tombstone_unbound`
-
-#### Scenario: Announced fact without an owner
-
-- **WHEN** the only announced fact of an account carries no owner and the account has no mapping
-- **THEN** the deletion completes with no tombstone and the completion totals report `downstream_tombstone_unbound`
-
 ### Requirement: Blob erasure and blob registration share one lock
 
 The eraser SHALL hold the digest lock for the reference re-check and the byte erase of each blob in one transaction. A registrar SHALL take the same digest lock before inserting the first row that references a digest and SHALL verify the blob is present. If the blob is missing the registrar SHALL re-store it from the bytes it still holds, and otherwise SHALL fail with a retryable class and register nothing. At no commit point SHALL a row reference a missing blob.
@@ -173,3 +149,70 @@ After a privacy deletion, every project and conversation that remains SHALL hold
 
 - **WHEN** every export of the tenant is deleted
 - **THEN** no version snapshot of the tenant remains
+
+### Requirement: A tombstone goes to every owner its subject was announced under
+
+A user-requested deletion SHALL enqueue, for each deleted archive, conversation and project, one `ai_archive.subject.tombstoned.v1` envelope per distinct owner the announced-subject ledger holds for that subject, addressed to that owner, with reason `user_requested`. The owner SHALL be read from `chatgpt_archive.announced_subjects` inside the row-removal transaction and SHALL NOT be read from the live `PLATFORM_ACCOUNTS` mapping or from outbox envelopes. A subject with no ledger row SHALL emit no tombstone, SHALL NOT report a gap and SHALL NOT fail the request. The ledger rows of a tombstoned subject SHALL be deleted in the same transaction and no other subject's rows SHALL be touched. A tenant deletion SHALL keep unpublished tombstones of earlier requests. Survivors of the deletion SHALL be announced again under the owner of the retained archive's ledger row.
+
+#### Scenario: Archive deletion tombstone
+
+- **WHEN** an archive of a mapped account is deleted
+- **THEN** the outbox row decodes as an `EventEnvelope` whose tenant and payload owner are `user:<Platform user>`, and whose evidence blob exists
+
+#### Scenario: The mapping changed after the import
+
+- **WHEN** an archive was announced under `user:A` and the mapping no longer contains its account, or names another user, and the archive is deleted
+- **THEN** the tombstones name `user:A` and the completion totals hold no `downstream_tombstone_unbound`
+
+#### Scenario: Two owners for one conversation
+
+- **WHEN** two archives of one account were announced under `user:A` and `user:B`, both announced one conversation, and a tenant-scope deletion runs
+- **THEN** one tombstone names the conversation for `user:A`, one for `user:B`, each archive tombstone names its own owner, and no tombstone names a third user
+
+#### Scenario: Nothing was announced
+
+- **WHEN** an account that never announced a fact has an archive deleted
+- **THEN** the deletion completes with no tombstone and no `downstream_tombstone_unbound`
+
+#### Scenario: The ledger is cleaned with the subject
+
+- **WHEN** a subject is tombstoned
+- **THEN** its ledger rows are gone and the ledger rows of every other subject remain
+
+### Requirement: A deletion keeps every unacknowledged tombstone
+
+No deletion SHALL remove a `ai_archive.subject.tombstoned.v1` outbox row whose `acknowledged_at` is null, whether or not it was published. An acknowledged tombstone MAY be removed with the tenant's rows.
+
+#### Scenario: A later tenant deletion
+
+- **WHEN** a tenant-scope deletion runs while an earlier tombstone is published and not acknowledged
+- **THEN** the earlier tombstone row remains
+
+#### Scenario: An acknowledged tombstone
+
+- **WHEN** a tenant-scope deletion runs and an earlier tombstone is acknowledged
+- **THEN** the earlier tombstone row is removed with the tenant's other outbox rows
+
+### Requirement: A deletion asks Edge to erase the facts it removed from the outbox
+
+Every path that removes a published, content-bearing fact row (`ai_archive.archive.imported`, `conversation.added|updated`, `project.added|updated`, `artifact.added|updated`) SHALL collect its `published_stream_seq` before the row is gone and SHALL, in the same transaction, enqueue one `platform.stream_erasure.requested.v1` command per distinct owner with at most 500 ascending sequences each. A tombstone, an operation report and an unpublished fact SHALL NOT contribute a sequence. The command SHALL be a complete `CommandEnvelope` whose producer is `ratatoskr-chatgpt`, whose `aggregate_id` is `privacy_request:<request id>` and whose `tenant_id` equals the payload `owner`.
+
+#### Scenario: Archive deletion
+
+- **WHEN** an archive whose conversation and project facts were published is deleted
+- **THEN** one command per owner lists the sequences of all those facts, including superseded `conversation.updated` rows, in ascending order
+
+#### Scenario: More than 500 sequences
+
+- **WHEN** a deletion removes more than 500 published facts of one owner
+- **THEN** the sequences are split into several commands of at most 500, each ascending
+
+#### Scenario: Unpublished facts
+
+- **WHEN** a deleted fact was never published
+- **THEN** it adds no sequence and no command
+
+#### Scenario: A later deletion
+
+- **WHEN** a tenant-scope deletion runs while an erasure command is unpublished
+- **THEN** the command row remains
