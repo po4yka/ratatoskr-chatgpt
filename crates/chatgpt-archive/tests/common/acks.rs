@@ -38,7 +38,7 @@ pub(crate) fn acknowledgement_envelope(
     EventEnvelope {
         event_id,
         event_type: KnowledgeDeletionAcknowledged::event_type(),
-        occurred_at: WireTimestamp::now(),
+        occurred_at: WireTimestamp::parse("2026-10-12T10:00:00Z").expect("a literal instant"),
         producer: ProducerName::parse("ratatoskr-knowledge").expect("a literal producer"),
         aggregate_id: acknowledgement.subject.clone(),
         correlation_id: event_id.as_entity_ref(),

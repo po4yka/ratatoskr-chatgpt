@@ -187,7 +187,7 @@ fn applied_acknowledgement(event: &NormalizedArchiveEvent) -> EventEnvelope {
     EventEnvelope {
         event_id: id,
         event_type: KnowledgeDeletionAcknowledged::event_type(),
-        occurred_at: WireTimestamp::now(),
+        occurred_at: WireTimestamp::parse("2026-10-12T10:00:00Z").expect("a literal instant"),
         producer: ProducerName::parse("ratatoskr-knowledge").expect("a producer"),
         aggregate_id: acknowledgement.subject.clone(),
         correlation_id: id.as_entity_ref(),
