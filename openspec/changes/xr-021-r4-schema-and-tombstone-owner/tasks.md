@@ -14,7 +14,7 @@
 
 ## 3. Documentation
 
-- [ ] 3.1 `README.md` and `deploy/systemd/chatgpt.conf.example` describe the rule (documentation; no failing test).
+- [x] 3.1 `README.md` and `deploy/systemd/chatgpt.conf.example` describe the rule (documentation; no failing test).
 
 ## 4. Gate
 
