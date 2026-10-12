@@ -6,13 +6,15 @@
 //! table, publishes the stored document unchanged, and marks the row only after the
 //! broker acknowledgement resolves (XR-021 CONTRACTS.md sections S02 and S07).
 
-use ratatoskr_event_envelope::EventEnvelope;
+use ratatoskr_event_envelope::{CommandEnvelope, EventEnvelope};
+use sqlx::Row as _;
 
 use crate::deletion_ack::{TOMBSTONE_EVENT_TYPE, TombstoneResend};
-use sqlx::Row as _;
 
 /// Subject Platform consumes to project producer operation facts.
 const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.chatgpt.operation.reported.v1";
+/// The one command this service produces: a request to Edge to erase stream messages.
+const STREAM_ERASURE_COMMAND: &str = "platform.stream_erasure.requested.v1";
 /// Room kept below the broker's `max_payload` for headers and framing (XR-021 CONTRACTS.md R2-04
 /// rule 2).
 const PAYLOAD_HEADROOM_BYTES: usize = 1024;
@@ -42,6 +44,8 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
         "ai_archive.artifact.added.v1" => "evt.ai_archive.artifact.added.v1",
         "ai_archive.artifact.updated.v1" => "evt.ai_archive.artifact.updated.v1",
         "ai_archive.subject.tombstoned.v1" => "evt.ai_archive.subject.tombstoned.v1",
+        // A command publishes to `cmd.` plus its command type (XR-021 CONTRACTS.md S02 rule 2).
+        "platform.stream_erasure.requested.v1" => "cmd.platform.stream_erasure.requested.v1",
         _ => return None,
     })
 }
@@ -235,11 +239,11 @@ impl ArchiveEventOutbox {
                 continue;
             }
             match publish_row(&jetstream, subject, &event_id, body).await {
-                Ok(()) => {
+                Ok(sequence) => {
                     if resend {
                         self.mark_resent(id).await?;
                     } else {
-                        self.mark_published(id).await?;
+                        self.mark_published(id, sequence).await?;
                     }
                     published += 1;
                 }
@@ -259,12 +263,13 @@ impl ArchiveEventOutbox {
         first_failure.map_or(Ok(published), Err)
     }
 
-    /// Marks a first publication. A tombstone also schedules its first resend, which is cancelled
-    /// by Knowledge's acknowledgement.
-    async fn mark_published(&self, id: i64) -> Result<(), PublishError> {
+    /// Marks a first publication and records the stream sequence of the broker acknowledgement
+    /// (XR-021 CONTRACTS.md R5-12). A tombstone also schedules its first resend, which is
+    /// cancelled by Knowledge's acknowledgement.
+    async fn mark_published(&self, id: i64, sequence: u64) -> Result<(), PublishError> {
         sqlx::query(
             "UPDATE chatgpt_archive.outbox_events
-             SET published_at = now(),
+             SET published_at = now(), published_stream_seq = $4,
                  next_resend_at = CASE WHEN event_type = $2
                                        THEN now() + make_interval(secs => $3) END
              WHERE id = $1 AND published_at IS NULL",
@@ -272,6 +277,7 @@ impl ArchiveEventOutbox {
         .bind(id)
         .bind(TOMBSTONE_EVENT_TYPE)
         .bind(self.resend.after.as_secs_f64())
+        .bind(i64::try_from(sequence).unwrap_or(i64::MAX))
         .execute(&self.pool)
         .await
         .map_err(PublishError::Database)?;
@@ -359,13 +365,20 @@ impl ArchiveEventOutbox {
     }
 }
 
-/// The stored document as the bytes to publish and its event id, after proving it is the
-/// envelope of the row's declared type.
+/// The stored document as the bytes to publish and its event or command id, after proving it is
+/// the envelope of the row's declared type.
 fn stored_envelope(
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<(Vec<u8>, String), PublishError> {
     let bytes = serde_json::to_vec(payload).map_err(PublishError::Encode)?;
+    if event_type == STREAM_ERASURE_COMMAND {
+        let command = CommandEnvelope::from_json(&bytes).map_err(|_| PublishError::InvalidRow)?;
+        if command.command_type.to_wire() != event_type {
+            return Err(PublishError::InvalidRow);
+        }
+        return Ok((bytes, command.command_id.to_string()));
+    }
     let envelope = EventEnvelope::from_json(&bytes).map_err(|_| PublishError::InvalidRow)?;
     if envelope.event_type.to_wire() != event_type {
         return Err(PublishError::InvalidRow);
@@ -378,15 +391,16 @@ async fn publish_row(
     subject: &'static str,
     event_id: &str,
     body: Vec<u8>,
-) -> Result<(), PublishError> {
+) -> Result<u64, PublishError> {
     let mut headers = async_nats::HeaderMap::new();
     headers.insert("Nats-Msg-Id", event_id);
     let acknowledgement = jetstream
         .publish_with_headers(subject, headers, body.into())
         .await
         .map_err(PublishError::broker)?;
-    acknowledgement.await.map_err(PublishError::broker)?;
-    Ok(())
+    // A duplicate acknowledgement carries the sequence of the message the broker already held.
+    let acknowledgement = acknowledgement.await.map_err(PublishError::broker)?;
+    Ok(acknowledgement.sequence)
 }
 
 /// Why an outbox pass could not progress; callers keep the durable row pending.
@@ -473,6 +487,14 @@ mod tests {
                 "{event_type}"
             );
         }
+    }
+
+    #[test]
+    fn the_stream_erasure_command_publishes_to_cmd_plus_its_type() {
+        assert_eq!(
+            subject_for_event_type("platform.stream_erasure.requested.v1"),
+            Some("cmd.platform.stream_erasure.requested.v1")
+        );
     }
 
     #[test]

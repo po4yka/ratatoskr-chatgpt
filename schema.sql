@@ -297,6 +297,10 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     ack_outcome     TEXT CHECK (ack_outcome IN ('applied', 'refused')),
     resend_count    INTEGER NOT NULL DEFAULT 0,
     next_resend_at  TIMESTAMPTZ,
+    -- The stream sequence the broker acknowledged when the row was published (XR-021 CONTRACTS.md
+    -- R5-12). A deletion collects it for every published content-bearing fact it removes and asks
+    -- Edge to erase those stream messages. A duplicate acknowledgement carries the original.
+    published_stream_seq BIGINT,
     -- The payload is always the complete event envelope. The publisher maps the type to a
     -- subject through a closed table, so a type outside this list could never be delivered.
     CONSTRAINT outbox_event_type_closed CHECK (event_type IN (
@@ -308,7 +312,8 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
         'ai_archive.project.updated.v1',
         'ai_archive.artifact.added.v1',
         'ai_archive.artifact.updated.v1',
-        'ai_archive.subject.tombstoned.v1'
+        'ai_archive.subject.tombstoned.v1',
+        'platform.stream_erasure.requested.v1'
     ))
 );
 

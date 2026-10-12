@@ -14,6 +14,7 @@ use ratatoskr_identifiers::{BlobRef, CorrelationId, TenantRef, WireTimestamp};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use super::erasure::{PublishedFacts, drop_published_fact_rows, enqueue_erasure_commands};
 use super::execution::DurableRequest;
 use super::restore::restore_retained_versions;
 use super::service::{
@@ -66,7 +67,7 @@ pub(super) async fn remove_rows(
     // The ledger is read before the rows go: a tenant-scope deletion removes the account, and the
     // ledger rows of an account go with it (XR-021 CONTRACTS.md R5-06).
     let announcements = read_announcements(&mut transaction, durable.tenant_id, request_id).await?;
-    delete_scoped_rows(&mut transaction, request_id, durable.tenant_id).await?;
+    let dropped_facts = delete_scoped_rows(&mut transaction, request_id, durable.tenant_id).await?;
     // A survivor must hold only what a retained export holds, before it is announced again.
     restore_retained_versions(&mut transaction, durable.tenant_id).await?;
     let removed_at = database_now(&mut transaction).await?;
@@ -77,6 +78,14 @@ pub(super) async fn remove_rows(
         &announcements,
         evidence_ref,
         removed_at,
+    )
+    .await?;
+    enqueue_erasure_commands(
+        &mut transaction,
+        durable,
+        request_id,
+        removed_at,
+        &dropped_facts,
     )
     .await?;
     if !survivors.is_empty() {
@@ -112,12 +121,13 @@ pub(super) async fn remove_rows(
     Ok(())
 }
 
-/// Deletes every selected row, dependents first, in foreign-key-safe order.
+/// Deletes every selected row, dependents first, in foreign-key-safe order, and returns the
+/// stream sequences of the published facts among the outbox rows it removed.
 async fn delete_scoped_rows(
     transaction: &mut Tx<'_>,
     request_id: Uuid,
     tenant_id: Uuid,
-) -> Result<(), PrivacyDeletionError> {
+) -> Result<PublishedFacts, PrivacyDeletionError> {
     let exports = item_ids(transaction, request_id, "export", "remove").await?;
     delete_export_dependents(transaction, &exports).await?;
     for (category, query) in [
@@ -178,20 +188,18 @@ async fn delete_scoped_rows(
     ] {
         delete_uuid_category(transaction, request_id, category, query).await?;
     }
-    for (category, query) in [
-        (
-            "inbox_event",
-            "DELETE FROM chatgpt_archive.inbox_events WHERE id = ANY($1)",
-        ),
-        (
-            "outbox_event",
-            "DELETE FROM chatgpt_archive.outbox_events WHERE id = ANY($1)",
-        ),
-    ] {
-        delete_i64_category(transaction, request_id, category, query).await?;
-    }
+    delete_i64_category(
+        transaction,
+        request_id,
+        "inbox_event",
+        "DELETE FROM chatgpt_archive.inbox_events WHERE id = ANY($1)",
+    )
+    .await?;
+    let outbox_ids = i64_item_ids(transaction, request_id, "outbox_event").await?;
+    let dropped = drop_published_fact_rows(transaction, &outbox_ids, &exports).await?;
     repoint_surviving_provenance(transaction, &exports).await?;
-    delete_exports_and_account(transaction, request_id, tenant_id, &exports).await
+    delete_exports_and_account(transaction, request_id, tenant_id, &exports).await?;
+    Ok(dropped)
 }
 
 /// Platform operation bindings and reparse results depend on the export and its
@@ -506,12 +514,12 @@ async fn item_ids(
         .collect()
 }
 
-async fn delete_i64_category(
+/// The numeric identities of one inventory category that are planned for removal.
+async fn i64_item_ids(
     transaction: &mut Tx<'_>,
     request_id: Uuid,
     category: &str,
-    query: &str,
-) -> Result<(), PrivacyDeletionError> {
+) -> Result<Vec<i64>, PrivacyDeletionError> {
     let values: Vec<String> = sqlx::query_scalar(
         "SELECT opaque_id FROM chatgpt_archive.privacy_deletion_items
          WHERE request_id = $1 AND category = $2 AND action = 'remove' ORDER BY opaque_id",
@@ -520,11 +528,23 @@ async fn delete_i64_category(
     .bind(category)
     .fetch_all(&mut **transaction)
     .await?;
-    let ids: Result<Vec<i64>, _> = values
+    values
         .into_iter()
-        .map(|value| value.parse::<i64>())
-        .collect();
-    let ids = ids.map_err(|_| PrivacyDeletionError::InvalidInventory)?;
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .map_err(|_| PrivacyDeletionError::InvalidInventory)
+        })
+        .collect()
+}
+
+async fn delete_i64_category(
+    transaction: &mut Tx<'_>,
+    request_id: Uuid,
+    category: &str,
+    query: &str,
+) -> Result<(), PrivacyDeletionError> {
+    let ids = i64_item_ids(transaction, request_id, category).await?;
     sqlx::query(query)
         .bind(ids)
         .execute(&mut **transaction)

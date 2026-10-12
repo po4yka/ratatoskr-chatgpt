@@ -1,5 +1,6 @@
 //! Tenant-authorized, inventory-first privacy deletion.
 
+mod erasure;
 mod execution;
 mod gate;
 mod model;

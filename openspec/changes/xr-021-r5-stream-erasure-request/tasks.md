@@ -4,17 +4,17 @@
 
 ## 1. Sequence recording
 
-- [ ] 1.1 RED: `tests/stream_sequence.rs` (real broker) fails on its assertions with a pump that stores no sequence: after publication `published_stream_seq` is null while the stored stream message has a sequence; a duplicate PubAck must still carry the original.
-- [ ] 1.2 GREEN: `published_stream_seq` in `schema.sql`, `mark_published(id, sequence)` from the `PublishAck`; the tests pass.
+- [x] 1.1 RED: `tests/stream_sequence.rs` (real broker) failed on its assertions with a pump that stored no sequence: `a published row records its stream sequence` (the column was null) and `a duplicate acknowledgement carries the original sequence` (left None, right Some(1)).
+- [x] 1.2 GREEN: `published_stream_seq` in `schema.sql`, `mark_published(id, sequence)` from the `PublishAck`; the tests pass.
 
 ## 2. The command
 
-- [ ] 2.1 RED: `tests/stream_erasure_request.rs` (real PostgreSQL, then real broker) fails with a stub `drop_published_fact_rows` that returns no sequences: deleting an archive whose facts were published enqueues no command, a tenant deletion covers no fact, more than 500 sequences are not split, an unpublished fact must add none, tombstones and operation reports must never be listed, the pump has no subject for the command type.
-- [ ] 2.2 GREEN: `drop_published_fact_rows`, `stream_erasure.rs`, the pump subject and the schema `CHECK`; the tests pass, including the fake Platform handler that deletes the named sequence and leaves another owner's message alone.
+- [x] 2.1 RED: `tests/stream_erasure_request.rs` (real PostgreSQL, then a real broker with a fake Platform handler) failed with a stub `enqueue_erasure_commands` that queued nothing: an archive deletion queued no command (`one command for the one owner`, left 0), a tenant deletion listed nothing, 502 sequences were not split into two commands, the survivor path listed nothing, an unpublished erasure command could not be shown to survive, and the broker held no command on `cmd.platform.stream_erasure.requested.v1`.
+- [x] 2.2 GREEN: `drop_published_fact_rows`, `stream_erasure.rs`, the pump subject and the schema `CHECK`; the tests pass, including the fake Platform handler that deletes the named sequence and leaves another owner's message alone.
 
 ## 3. Documentation and ACL copy
 
-- [ ] 3.1 `README.md`, `DEVELOPMENT.md` and `deploy/nats/identity.conf` describe the sequence column, the command and the publish allow (documentation and configuration; no failing test).
+- [x] 3.1 `README.md`, `DEVELOPMENT.md` and `deploy/nats/identity.conf` describe the sequence column, the command and the publish allow (documentation and configuration; no failing test).
 
 ## 4. Gate
 

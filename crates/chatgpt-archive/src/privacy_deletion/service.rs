@@ -32,6 +32,9 @@ pub enum PrivacyDeletionError {
     /// The survivors of the deletion could not be announced again.
     #[error("privacy deletion could not announce the surviving records again")]
     Reannounce(#[from] crate::ProjectionError),
+    /// A stream erasure command could not be constructed.
+    #[error("privacy deletion could not construct a stream erasure command")]
+    StreamErasure,
     /// A test seam injected a finalization failure.
     #[error("privacy deletion finalization failed")]
     InjectedFinalization,
@@ -598,11 +601,14 @@ async fn add_delivery_rows(
     }
     // An unacknowledged tombstone is the only record that Knowledge must delete what this
     // archive no longer holds, and the pump re-sends it until Knowledge acknowledges it, so no
-    // later deletion may take it with the tenant's rows (XR-021 CONTRACTS.md R5-11).
+    // later deletion may take it with the tenant's rows (XR-021 CONTRACTS.md R5-11). An erasure
+    // command that is not yet published is the only record that Edge must erase stream messages
+    // (R5-12), so it survives for the same reason.
     let outbox: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM chatgpt_archive.outbox_events
          WHERE tenant_id = $1 AND ($2 OR export_id = ANY($3))
            AND NOT (event_type = 'ai_archive.subject.tombstoned.v1' AND acknowledged_at IS NULL)
+           AND NOT (event_type = 'platform.stream_erasure.requested.v1' AND published_at IS NULL)
          ORDER BY id",
     )
     .bind(tenant_id)

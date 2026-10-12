@@ -17,6 +17,7 @@ use std::io::Write as _;
 
 pub(crate) mod acks;
 pub(crate) mod broker;
+pub(crate) mod imports;
 pub(crate) mod logs;
 pub(crate) mod outbox;
 

@@ -11,120 +11,18 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
-use common::{DisposableDatabase, Received, archive_limits, drain, receive_export, zip_of};
+use common::imports::Fixture;
 use ratatoskr_ai_archive_contracts::{AiArchiveTombstone, AiArchiveTombstoneSubject};
-use ratatoskr_chatgpt_archive::privacy_deletion::{
-    DeletionReport, PrivacyDeletionScope, PrivacyDeletionService,
-};
-use ratatoskr_chatgpt_archive::{BlobStore, InitialImportWorker, ParserRegistry};
+use ratatoskr_chatgpt_archive::privacy_deletion::PrivacyDeletionScope;
 use ratatoskr_event_envelope::EventEnvelope;
 use uuid::Uuid;
 
-const ACCOUNT: &str = "acc-owner-ledger";
 const USER_A: &str = "018f0000-0000-7000-8000-0000000000a1";
 const USER_B: &str = "018f0000-0000-7000-8000-0000000000b2";
 const USER_C: &str = "018f0000-0000-7000-8000-0000000000c3";
 
-/// A cumulative export holding the listed `(conversation id, text)` pairs.
-fn export(conversations: &[(&str, &str)]) -> Vec<u8> {
-    let documents: Vec<serde_json::Value> = conversations
-        .iter()
-        .map(|(id, text)| {
-            serde_json::json!({
-                "id": id,
-                "title": format!("Title of {id}"),
-                "mapping": {"node": {
-                    "id": "node",
-                    "parent": null,
-                    "message": {
-                        "id": format!("message-{id}"),
-                        "author": {"role": "user"},
-                        "content": {"parts": [text]}
-                    }
-                }}
-            })
-        })
-        .collect();
-    let body = serde_json::Value::Array(documents).to_string();
-    zip_of(&[("conversations.json", body.as_bytes())])
-}
-
-struct Fixture {
-    database: DisposableDatabase,
-    blobs: BlobStore,
-    _root: tempfile::TempDir,
-}
-
 impl Fixture {
-    async fn new() -> Self {
-        let root = tempfile::tempdir().expect("blob root");
-        Self {
-            database: DisposableDatabase::create().await,
-            blobs: BlobStore::new(root.path()).expect("blob store"),
-            _root: root,
-        }
-    }
-
-    /// An import worker whose mapping names `user` for the account, or no mapping at all.
-    fn importer(&self, user: Option<&str>) -> InitialImportWorker {
-        let mapping = user
-            .map(|user| {
-                vec![(
-                    Uuid::parse_str(user).expect("a literal UUID"),
-                    ACCOUNT.to_owned(),
-                )]
-            })
-            .unwrap_or_default();
-        InitialImportWorker::new(
-            self.database.pool().clone(),
-            self.blobs.clone(),
-            Arc::new(ParserRegistry::runtime().expect("the runtime registry builds")),
-            archive_limits(),
-        )
-        .with_platform_users(mapping)
-    }
-
-    /// Receives and imports one export while the mapping names `user`.
-    async fn import(&self, user: Option<&str>, conversations: &[(&str, &str)]) -> Received {
-        let received = receive_export(
-            self.database.pool(),
-            &self.blobs,
-            ACCOUNT,
-            export(conversations),
-        )
-        .await;
-        drain(&self.importer(user)).await;
-        received
-    }
-
-    fn service(&self) -> PrivacyDeletionService {
-        PrivacyDeletionService::new(self.database.pool().clone(), self.blobs.clone())
-    }
-
-    async fn delete(&self, tenant: Uuid, scope: PrivacyDeletionScope) -> DeletionReport {
-        let service = self.service();
-        let request = Uuid::now_v7();
-        service
-            .plan(tenant, request, scope)
-            .await
-            .expect("planning succeeds")
-            .expect("the owned scope plans");
-        service
-            .execute(request)
-            .await
-            .expect("the deletion completes")
-    }
-
-    async fn conversation(&self, external_id: &str) -> Uuid {
-        sqlx::query_scalar("SELECT id FROM chatgpt_archive.conversations WHERE external_id = $1")
-            .bind(external_id)
-            .fetch_one(self.database.pool())
-            .await
-            .expect("the conversation was projected")
-    }
-
     /// `(subject, owner, archive named by the tombstone)` of every tombstone, sorted.
     async fn tombstones(&self) -> Vec<(String, String, Uuid)> {
         let rows: Vec<serde_json::Value> = sqlx::query_scalar(
