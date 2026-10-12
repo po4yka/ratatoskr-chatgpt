@@ -10,11 +10,12 @@
 //! yet erased is listed in a durable item.
 
 use ratatoskr_ai_archive_contracts::AiArchiveTombstone;
-use ratatoskr_identifiers::{BlobRef, CorrelationId, TenantRef, WireTimestamp};
+use ratatoskr_identifiers::{BlobRef, CorrelationId, WireTimestamp};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::execution::DurableRequest;
+use super::owner::{TombstoneOwner, owner_for_deletion};
 use super::restore::restore_retained_versions;
 use super::service::{
     FinalizationFault, PrivacyDeletionError, PrivacyDeletionService, lock_tenant,
@@ -51,11 +52,15 @@ pub(super) async fn remove_rows(
         transaction.rollback().await?;
         return Ok(());
     }
-    // The owner is resolved BEFORE the account row can be deleted.
-    let owner = service
-        .owners
-        .owner_of_account(&mut transaction, durable.tenant_id)
-        .await?;
+    // The owner is read from the announced facts BEFORE the outbox rows of the deleted exports
+    // and the account row can be deleted (XR-021 CONTRACTS.md R4-04).
+    let owner = owner_for_deletion(
+        &mut transaction,
+        &service.owners,
+        durable.tenant_id,
+        request_id,
+    )
+    .await?;
 
     delete_uuid_category(
         &mut transaction,
@@ -84,7 +89,7 @@ pub(super) async fn remove_rows(
         removed_at,
     )
     .await?;
-    if let Some(owner) = owner.filter(|_| !survivors.is_empty()) {
+    if let Some(owner) = owner.known().filter(|_| !survivors.is_empty()) {
         reannounce(
             &mut transaction,
             &Deletion {
@@ -355,15 +360,17 @@ pub(super) async fn blob_is_referenced(
 /// Queues one tombstone envelope per downstream subject, in the same transaction as
 /// the row removal.
 ///
-/// An account with no Platform owner queues nothing: the tombstone would name an
-/// owner Knowledge cannot match. The skip is made visible instead of silent. The item
-/// is marked failed with a fixed code, and the completion report counts it as
-/// `downstream_tombstone_unbound`. It never blocks the deletion.
+/// An account that announced facts but yields no Platform owner queues nothing: the
+/// tombstone would name an owner Knowledge cannot match. The skip is made visible instead
+/// of silent. The item is marked failed with a fixed code, and the completion report
+/// counts it as `downstream_tombstone_unbound`. It never blocks the deletion. An account
+/// that announced nothing has nothing for Knowledge to retract, so its items finish
+/// without a row and without a gap.
 async fn insert_tombstones(
     transaction: &mut Tx<'_>,
     durable: &DurableRequest,
     request_id: Uuid,
-    owner: Option<TenantRef>,
+    owner: TombstoneOwner,
     evidence_ref: &BlobRef,
     observed_at: WireTimestamp,
 ) -> Result<(), PrivacyDeletionError> {
@@ -383,16 +390,23 @@ async fn insert_tombstones(
         .correlation_id
         .map(|id| CorrelationId(id).as_entity_ref());
     for subject in subjects {
-        let Some(owner) = owner else {
-            mark_tombstone(
-                transaction,
-                request_id,
-                &subject,
-                "failed",
-                Some(UNBOUND_ERROR_CODE),
-            )
-            .await?;
-            continue;
+        let owner = match owner {
+            TombstoneOwner::Known(owner) => owner,
+            TombstoneOwner::NothingAnnounced => {
+                mark_tombstone(transaction, request_id, &subject, "finalized", None).await?;
+                continue;
+            }
+            TombstoneOwner::Unresolvable => {
+                mark_tombstone(
+                    transaction,
+                    request_id,
+                    &subject,
+                    "failed",
+                    Some(UNBOUND_ERROR_CODE),
+                )
+                .await?;
+                continue;
+            }
         };
         let (archive_id, subject_json) = tombstone_subject(&subject, fallback_archive)?;
         let payload: AiArchiveTombstone = serde_json::from_value(serde_json::json!({

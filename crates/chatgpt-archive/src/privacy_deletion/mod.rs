@@ -3,6 +3,7 @@
 mod execution;
 mod gate;
 mod model;
+mod owner;
 mod restore;
 mod rows;
 pub(crate) mod service;

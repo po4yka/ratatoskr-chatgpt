@@ -84,9 +84,11 @@ impl PrivacyDeletionService {
     /// Binds archive accounts to the Platform users that own their tombstones.
     ///
     /// `platform_accounts` pairs each Platform user with the external reference of the
-    /// account that user's archives arrive under. A deletion of an account that
-    /// appears in no pair still completes, queues no tombstone, and counts the skip
-    /// as `downstream_tombstone_unbound` in its completion report.
+    /// account that user's archives arrive under. A deletion addresses its tombstones to
+    /// the owner the archive's own announced facts named (XR-021 CONTRACTS.md R4-04); the
+    /// pairs answer only for an account that announced nothing. An account that announced
+    /// facts but yields no owner still completes, queues no tombstone, and counts the
+    /// skip as `downstream_tombstone_unbound` in its completion report.
     #[must_use]
     pub fn with_platform_users(mut self, platform_accounts: Vec<(Uuid, String)>) -> Self {
         self.owners = OwnerResolver::new(platform_accounts);

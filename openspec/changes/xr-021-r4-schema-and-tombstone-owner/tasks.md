@@ -9,8 +9,8 @@
 
 ## 2. The tombstone owner comes from the announced facts (R4-04)
 
-- [ ] 2.1 RED: `tests/privacy_deletion_tombstones.rs` cases for a changed mapping, a mapping naming another user, an account that announced nothing, a mapping fallback, an announced account with no resolvable owner, and survivors re-announced under the announced owner, in archive, conversation, project and tenant scopes.
-- [ ] 2.2 GREEN: `owner_for_deletion` replaces `owner_of_account` in the removal transaction; `downstream_tombstone_unbound` only for an announced account with no owner.
+- [x] 2.1 RED: `tests/privacy_deletion_tombstones.rs` `a_deletion_tombstones_to_the_owner_the_archive_was_announced_under_when_the_mapping_changed` (archive scope: "a tombstone must be queued"), `a_deletion_uses_the_announced_owner_even_when_the_mapping_names_another_user` (the tombstone named the mapped user instead of the announced one), `an_account_that_announced_nothing_completes_without_a_tombstone_or_an_unbound_item` (the report claimed `downstream_tombstone_unbound = 3`) and `survivors_are_re_announced_under_the_announced_owner` (an unbound item and no re-announcement) failed; the mapping fallback and the announced-without-owner cases stayed green as regression guards. Archive, conversation and tenant scopes each run the changed-mapping cases.
+- [x] 2.2 GREEN: `privacy_deletion/owner.rs` `owner_for_deletion` replaces `owner_of_account` in the removal transaction; `downstream_tombstone_unbound` only for an announced account with no owner; all eight tests of the file pass.
 
 ## 3. Documentation
 

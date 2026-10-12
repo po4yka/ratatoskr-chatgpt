@@ -10,10 +10,15 @@
 
 mod common;
 
-use common::{DisposableDatabase, blob, insert_account, insert_export};
+use std::sync::Arc;
+
+use common::{
+    DisposableDatabase, archive_limits, blob, drain, insert_account, insert_export, project_zip,
+    receive_export, zip_of,
+};
 use ratatoskr_ai_archive_contracts::{AiArchiveTombstone, AiArchiveTombstoneSubject};
-use ratatoskr_chatgpt_archive::BlobStore;
 use ratatoskr_chatgpt_archive::privacy_deletion::{PrivacyDeletionScope, PrivacyDeletionService};
+use ratatoskr_chatgpt_archive::{BlobStore, InitialImportWorker, ParserRegistry};
 use ratatoskr_event_envelope::EventEnvelope;
 use uuid::Uuid;
 
@@ -195,7 +200,7 @@ async fn tombstone_outbox_row_is_a_complete_event_envelope_with_platform_owner()
 }
 
 #[tokio::test]
-async fn unmapped_account_emits_no_tombstone_and_reports_unbound_count() {
+async fn an_account_that_announced_nothing_completes_without_a_tombstone_or_an_unbound_item() {
     let database = DisposableDatabase::create().await;
     let root = tempfile::tempdir().expect("blob root");
     let blobs = BlobStore::new(root.path()).expect("blob store");
@@ -206,17 +211,48 @@ async fn unmapped_account_emits_no_tombstone_and_reports_unbound_count() {
     let report = service
         .execute(request)
         .await
-        .expect("an unmapped account never blocks the deletion");
+        .expect("an account with nothing announced never blocks the deletion");
 
     assert!(
         tombstone_rows(&database).await.is_empty(),
-        "a tombstone with no Platform owner would name a tenant Knowledge cannot match"
+        "nothing was announced, so there is nothing for Knowledge to retract"
     );
     assert_eq!(
         report.totals.get("downstream_tombstone_unbound"),
-        Some(&3),
-        "the skip is visible in the completion report"
+        None,
+        "the report claims no gap for an account that announced nothing"
     );
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn an_account_with_a_mapping_and_no_outbox_fact_falls_back_to_the_mapping() {
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let seeded = seed(&database, &blobs, b"fallback raw").await;
+    let service = mapped(
+        &database,
+        &blobs,
+        &account_reference(&database, seeded.tenant).await,
+    );
+    let request = plan_archive(&service, &seeded).await;
+
+    let report = service
+        .execute(request)
+        .await
+        .expect("the deletion completes");
+
+    let rows = tombstone_rows(&database).await;
+    assert_eq!(
+        rows.len(),
+        3,
+        "one per deleted archive, conversation and project"
+    );
+    for (_, stored) in rows {
+        assert_eq!(owner_of(&stored), format!("user:{PLATFORM_USER}"));
+    }
+    assert_eq!(report.totals.get("downstream_tombstone_unbound"), None);
     database.discard().await;
 }
 
@@ -262,6 +298,277 @@ async fn tenant_deletion_keeps_unpublished_tombstones_of_earlier_requests() {
         kept,
         earlier.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         "an unpublished tombstone is the only record that Knowledge must delete; tenant erasure must not take it"
+    );
+    database.discard().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The owner is the one the archive was announced under (XR-021 CONTRACTS.md R4-04).
+// ---------------------------------------------------------------------------------------------
+
+const ACCOUNT: &str = "acc-announced";
+const ANNOUNCED_USER: &str = "018f0000-0000-7000-8000-0000000000a1";
+const OTHER_USER: &str = "018f0000-0000-7000-8000-0000000000b2";
+
+fn user(uuid: &str) -> Uuid {
+    Uuid::parse_str(uuid).expect("a literal UUID")
+}
+
+fn owner_of(stored: &serde_json::Value) -> String {
+    let envelope: EventEnvelope =
+        serde_json::from_value(stored.clone()).expect("the stored body is an envelope");
+    let tombstone: AiArchiveTombstone = envelope.payload_as().expect("a tombstone payload");
+    tombstone.owner.to_string()
+}
+
+/// An export imported and announced while the mapping named `ANNOUNCED_USER`.
+struct Announced {
+    database: DisposableDatabase,
+    blobs: BlobStore,
+    _root: tempfile::TempDir,
+    tenant: Uuid,
+    archive: Uuid,
+    conversation: Uuid,
+}
+
+impl Announced {
+    /// Imports the synthetic project archive through the real worker under `mapping`.
+    async fn import(mapping: Vec<(Uuid, String)>) -> Self {
+        let database = DisposableDatabase::create().await;
+        let root = tempfile::tempdir().expect("blob root");
+        let blobs = BlobStore::new(root.path()).expect("blob store");
+        let worker = InitialImportWorker::new(
+            database.pool().clone(),
+            blobs.clone(),
+            Arc::new(ParserRegistry::runtime().expect("the runtime registry builds")),
+            archive_limits(),
+        )
+        .with_platform_users(mapping);
+        let received = receive_export(database.pool(), &blobs, ACCOUNT, project_zip()).await;
+        drain(&worker).await;
+        let conversation: Uuid = sqlx::query_scalar(
+            "SELECT id FROM chatgpt_archive.conversations WHERE account_id = $1",
+        )
+        .bind(received.account)
+        .fetch_one(database.pool())
+        .await
+        .expect("the import projected one conversation");
+        Self {
+            database,
+            blobs,
+            _root: root,
+            tenant: received.account,
+            archive: received.archive,
+            conversation,
+        }
+    }
+
+    async fn announced_under(user_id: &str) -> Self {
+        Self::import(vec![(user(user_id), ACCOUNT.to_owned())]).await
+    }
+
+    fn service(&self, mapping: Vec<(Uuid, String)>) -> PrivacyDeletionService {
+        PrivacyDeletionService::new(self.database.pool().clone(), self.blobs.clone())
+            .with_platform_users(mapping)
+    }
+
+    /// The deletion scope a case names: `archive`, `conversation` or `tenant`.
+    fn scope(&self, name: &str) -> PrivacyDeletionScope {
+        match name {
+            "archive" => PrivacyDeletionScope::Archive {
+                ai_archive_id: self.archive,
+            },
+            "conversation" => PrivacyDeletionScope::Conversation {
+                conversation_id: self.conversation,
+            },
+            "tenant" => PrivacyDeletionScope::Tenant,
+            other => panic!("unknown scope {other}"),
+        }
+    }
+
+    async fn delete(
+        &self,
+        service: &PrivacyDeletionService,
+        scope: PrivacyDeletionScope,
+    ) -> ratatoskr_chatgpt_archive::privacy_deletion::DeletionReport {
+        let request = Uuid::now_v7();
+        service
+            .plan(self.tenant, request, scope)
+            .await
+            .expect("planning succeeds")
+            .expect("the owned scope plans");
+        service
+            .execute(request)
+            .await
+            .expect("the deletion completes")
+    }
+}
+
+/// Deletes the announced archive in every scope under `replacement` and asserts that each
+/// tombstone names `ANNOUNCED_USER` and that no item was left unbound.
+async fn assert_announced_owner_wins(replacement: impl Fn() -> Vec<(Uuid, String)>) {
+    for name in ["archive", "conversation", "tenant"] {
+        let announced = Announced::announced_under(ANNOUNCED_USER).await;
+        let report = announced
+            .delete(&announced.service(replacement()), announced.scope(name))
+            .await;
+
+        let rows = tombstone_rows(&announced.database).await;
+        let queued = report.totals.get("downstream_tombstone").copied();
+        assert!(!rows.is_empty(), "{name}: a tombstone must be queued");
+        assert_eq!(
+            Some(u64::try_from(rows.len()).expect("a small count")),
+            queued,
+            "{name}: every planned tombstone is queued"
+        );
+        for (_, stored) in &rows {
+            assert_eq!(
+                owner_of(stored),
+                format!("user:{ANNOUNCED_USER}"),
+                "{name}: the owner the archive was announced under"
+            );
+        }
+        assert_eq!(
+            report.totals.get("downstream_tombstone_unbound"),
+            None,
+            "{name}: no tombstone is reported as unbound"
+        );
+        announced.database.discard().await;
+    }
+}
+
+#[tokio::test]
+async fn a_deletion_tombstones_to_the_owner_the_archive_was_announced_under_when_the_mapping_changed()
+ {
+    // The mapping no longer contains the account at all.
+    assert_announced_owner_wins(Vec::new).await;
+}
+
+#[tokio::test]
+async fn a_deletion_uses_the_announced_owner_even_when_the_mapping_names_another_user() {
+    assert_announced_owner_wins(|| vec![(user(OTHER_USER), ACCOUNT.to_owned())]).await;
+}
+
+#[tokio::test]
+async fn an_announced_account_with_no_resolvable_owner_still_reports_unbound() {
+    let announced = Announced::announced_under(ANNOUNCED_USER).await;
+    // Every announced fact loses its owner: the typed payload owners and the envelope tenant.
+    sqlx::query(
+        "UPDATE chatgpt_archive.outbox_events
+         SET payload = (payload - 'tenant_id')
+             #- '{payload,owner}'
+             #- '{payload,import_provenance,owner}'
+             #- '{payload,conversation,owner}'
+         WHERE event_type LIKE 'ai_archive.%'",
+    )
+    .execute(announced.database.pool())
+    .await
+    .expect("the owners are stripped");
+
+    let report = announced
+        .delete(
+            &announced.service(Vec::new()),
+            PrivacyDeletionScope::Archive {
+                ai_archive_id: announced.archive,
+            },
+        )
+        .await;
+
+    assert!(tombstone_rows(&announced.database).await.is_empty());
+    assert_eq!(
+        report.totals.get("downstream_tombstone_unbound"),
+        Some(&3),
+        "the skip stays visible when facts were announced and no owner can be found"
+    );
+    announced.database.discard().await;
+}
+
+/// A cumulative export holding the listed conversations, each with one text message.
+fn export_of(conversations: &[&str]) -> Vec<u8> {
+    let documents: Vec<serde_json::Value> = conversations
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "title": format!("Title of {id}"),
+                "mapping": {"node": {
+                    "id": "node",
+                    "parent": null,
+                    "message": {
+                        "id": format!("message-{id}"),
+                        "author": {"role": "user"},
+                        "content": {"parts": [format!("Text of {id}")]}
+                    }
+                }}
+            })
+        })
+        .collect();
+    let body = serde_json::Value::Array(documents).to_string();
+    zip_of(&[("conversations.json", body.as_bytes())])
+}
+
+#[tokio::test]
+async fn survivors_are_re_announced_under_the_announced_owner() {
+    let database = DisposableDatabase::create().await;
+    let root = tempfile::tempdir().expect("blob root");
+    let blobs = BlobStore::new(root.path()).expect("blob store");
+    let worker = InitialImportWorker::new(
+        database.pool().clone(),
+        blobs.clone(),
+        Arc::new(ParserRegistry::runtime().expect("the runtime registry builds")),
+        archive_limits(),
+    )
+    .with_platform_users(vec![(user(ANNOUNCED_USER), ACCOUNT.to_owned())]);
+    // Two cumulative exports: only the first announces conversation `conv-a`.
+    let first = receive_export(database.pool(), &blobs, ACCOUNT, export_of(&["conv-a"])).await;
+    drain(&worker).await;
+    receive_export(
+        database.pool(),
+        &blobs,
+        ACCOUNT,
+        export_of(&["conv-a", "conv-b"]),
+    )
+    .await;
+    drain(&worker).await;
+
+    // The mapping changed after the import: the account is no longer in it.
+    let service = PrivacyDeletionService::new(database.pool().clone(), blobs.clone());
+    let request = Uuid::now_v7();
+    service
+        .plan(
+            first.account,
+            request,
+            PrivacyDeletionScope::Archive {
+                ai_archive_id: first.archive,
+            },
+        )
+        .await
+        .expect("planning succeeds")
+        .expect("the owned archive plans");
+    let report = service
+        .execute(request)
+        .await
+        .expect("the deletion completes");
+
+    assert_eq!(report.totals.get("downstream_tombstone_unbound"), None);
+    for (_, stored) in tombstone_rows(&database).await {
+        assert_eq!(owner_of(&stored), format!("user:{ANNOUNCED_USER}"));
+    }
+    let owners: Vec<String> = sqlx::query_scalar(
+        "SELECT payload #>> '{payload,conversation,owner}'
+         FROM chatgpt_archive.outbox_events
+         WHERE event_type = 'ai_archive.conversation.updated.v1'
+           AND created_at >= (SELECT min(created_at) FROM chatgpt_archive.outbox_events
+                              WHERE event_type = 'ai_archive.subject.tombstoned.v1')
+         ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("the outbox is readable");
+    assert_eq!(
+        owners,
+        vec![format!("user:{ANNOUNCED_USER}")],
+        "the survivor conv-a is announced again under the owner it was announced under"
     );
     database.discard().await;
 }

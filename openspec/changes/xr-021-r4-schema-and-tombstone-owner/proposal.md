@@ -9,7 +9,7 @@ A privacy deletion sends its tombstones to the owner the live `RATATOSKR__RECEIP
 ## What Changes
 
 - `schema.sql` loses the seven `ALTER TABLE ... ADD COLUMN` statements and the comment above the second block. Every `CREATE TABLE IF NOT EXISTS` and index stays.
-- The row-removal transaction of a deletion resolves the tombstone owner from the announced facts in `chatgpt_archive.outbox_events`, read before the matching rows are removed: the latest `ai_archive.archive.imported.v1` envelope of a deleted archive, else the first announced fact of a deleted conversation or project, else the latest imported envelope of the account, else any announced fact of the account. The live mapping is consulted only when no announced fact gives an owner.
+- The row-removal transaction of a deletion resolves the tombstone owner from the announced facts in `chatgpt_archive.outbox_events`, read before the matching rows are removed: the latest `ai_archive.archive.imported.v1` envelope of a deleted archive (every archive, conversation and tenant scope deletes at least one archive, so this covers all three), else the latest announced non-tombstone fact of the account. The live mapping is consulted only when no announced fact gives an owner.
 - An account that announced no fact and has no mapping has nothing to retract: no tombstone, no unbound item. An account that announced facts but whose facts name no owner and has no mapping still reports `downstream_tombstone_unbound`.
 - Survivors are re-announced under the same owner.
 - `README.md` and `deploy/systemd/chatgpt.conf.example` describe the new rule.
