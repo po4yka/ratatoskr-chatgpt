@@ -13,13 +13,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::model::{DeletionPlan, DeletionReport, DeletionStatus, PrivacyDeletionScope};
-use super::rows::{self, UNBOUND_ERROR_CODE};
+use super::rows;
 use super::service::{
     FinalizationFault, PrivacyDeletionError, PrivacyDeletionService, lock_tenant,
 };
-
-/// The category the completion report adds when a tombstone had no Platform owner.
-const UNBOUND_TOTAL: &str = "downstream_tombstone_unbound";
 
 impl PrivacyDeletionService {
     /// Executes a request only when it belongs to the authenticated tenant.
@@ -161,15 +158,10 @@ impl PrivacyDeletionService {
                 .clone()
                 .ok_or(PrivacyDeletionError::InvalidInventory)?,
         )?;
-        let mut totals = plan.totals;
-        let unbound = unbound_tombstones(&self.pool, request_id).await?;
-        if unbound > 0 {
-            totals.insert(UNBOUND_TOTAL.to_owned(), unbound);
-        }
         let report = DeletionReport {
             request_id,
             status: DeletionStatus::Completed,
-            totals,
+            totals: plan.totals,
             evidence_ref,
             completed_at: completion_timestamp(WireTimestamp::now()),
         };
@@ -245,20 +237,6 @@ async fn set_item_state(
     .execute(&mut **transaction)
     .await?;
     Ok(())
-}
-
-/// How many tombstones were not queued because no Platform owner is configured.
-async fn unbound_tombstones(pool: &PgPool, request_id: Uuid) -> Result<u64, sqlx::Error> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM chatgpt_archive.privacy_deletion_items
-         WHERE request_id = $1 AND category = 'downstream_tombstone'
-           AND state = 'failed' AND error_code = $2",
-    )
-    .bind(request_id)
-    .bind(UNBOUND_ERROR_CODE)
-    .fetch_one(pool)
-    .await?;
-    Ok(u64::try_from(count).unwrap_or_default())
 }
 
 pub(super) struct DurableRequest {

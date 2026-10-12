@@ -9,12 +9,12 @@
 
 ## 2. One tombstone per owner
 
-- [ ] 2.1 RED: `tests/privacy_deletion_owner.rs` fails: (b) a tenant-scope deletion over two archives announced under two users queues one tombstone per owner for the shared conversation and none to a third user, (e) the ledger rows of a tombstoned subject remain, (f) `privacy_deletion/owner.rs` and `FACT_OWNER` still exist; (a), (c) and (d) pass or fail for the reasons recorded in the commit.
-- [ ] 2.2 GREEN: `privacy_deletion/owner.rs` is deleted, `insert_tombstones` reads the ledger, `reannounce` takes the retained archive's owner, `PrivacyDeletionService::with_platform_users` is removed and the existing deletion tests seed the ledger through a real import.
+- [x] 2.1 RED: `tests/privacy_deletion_owner.rs` failed on four assertions: a tenant-scope deletion over two archives announced under two users queued only user B's tombstones (one owner for the whole request), a re-announced survivor carried user A instead of the retained archive's user B, the ledger rows of a tombstoned subject remained, and `privacy_deletion/owner.rs` still existed. The announced-owner case across the three scopes and the never-announced case passed already (through the outbox scraping) and stay as regression guards.
+- [x] 2.2 GREEN: `privacy_deletion/owner.rs` is deleted, `insert_tombstones` reads the ledger, `reannounce` takes the retained archive's owner, `PrivacyDeletionService::with_platform_users` is removed and the existing deletion tests seed the ledger through a real import.
 
 ## 3. Documentation
 
-- [ ] 3.1 `README.md` describes the ledger and the per-owner tombstones (documentation; no failing test).
+- [x] 3.1 `README.md` describes the ledger and the per-owner tombstones (documentation; no failing test).
 
 ## 4. Gate
 

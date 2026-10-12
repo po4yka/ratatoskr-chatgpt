@@ -5,9 +5,9 @@
 //! keeps its own account identity internally; the only bridge between the two is the
 //! operator-configured `platform_accounts` list of `(Platform user, account external
 //! reference)` pairs. The resolver is a constructor parameter of every component that
-//! emits a fact, never a global. A privacy deletion does not follow it once the account has
-//! announced a fact: the tombstones go to the owner those facts named, and the resolver answers
-//! only for an account that announced nothing (XR-021 CONTRACTS.md R4-04).
+//! emits a fact, never a global. A privacy deletion never reads it: the tombstones go to the owners
+//! the announced-subject ledger recorded when each subject was announced (XR-021 CONTRACTS.md
+//! R5-06).
 
 use std::collections::HashMap;
 

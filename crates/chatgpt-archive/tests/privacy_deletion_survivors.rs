@@ -135,7 +135,6 @@ fn mapping() -> Vec<(Uuid, String)> {
 impl Imported {
     fn service(&self) -> PrivacyDeletionService {
         PrivacyDeletionService::new(self.database.pool().clone(), self.blobs.clone())
-            .with_platform_users(mapping())
     }
 
     async fn plan(&self, scope: PrivacyDeletionScope) -> Uuid {

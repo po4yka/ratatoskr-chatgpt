@@ -160,7 +160,12 @@ async fn an_account_without_a_mapping_emits_no_fact_and_writes_no_ledger_row() {
     let account_ref = format!("acc-{}", Uuid::now_v7());
     receive_export(database.pool(), &blobs, &account_ref, common::project_zip()).await;
 
-    drain(&worker(&database, &blobs, mapped(USER_B, "another-account"))).await;
+    drain(&worker(
+        &database,
+        &blobs,
+        mapped(USER_B, "another-account"),
+    ))
+    .await;
 
     assert!(
         fact_aggregate(&database, "ai_archive.archive.imported.v1")

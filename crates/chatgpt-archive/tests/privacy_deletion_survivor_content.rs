@@ -155,8 +155,7 @@ impl Account {
     }
 
     async fn delete_archive(&self, archive: Uuid) {
-        let service = PrivacyDeletionService::new(self.database.pool().clone(), self.blobs.clone())
-            .with_platform_users(mapping());
+        let service = PrivacyDeletionService::new(self.database.pool().clone(), self.blobs.clone());
         let request = Uuid::now_v7();
         service
             .plan(
@@ -521,8 +520,7 @@ async fn deleting_every_export_leaves_no_version_snapshot() {
     );
 
     let service =
-        PrivacyDeletionService::new(account.database.pool().clone(), account.blobs.clone())
-            .with_platform_users(mapping());
+        PrivacyDeletionService::new(account.database.pool().clone(), account.blobs.clone());
     let request = Uuid::now_v7();
     service
         .plan(account.tenant, request, PrivacyDeletionScope::Tenant)

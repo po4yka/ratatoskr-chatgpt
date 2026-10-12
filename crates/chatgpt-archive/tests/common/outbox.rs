@@ -37,13 +37,26 @@ pub(crate) fn seed_file() -> tempfile::NamedTempFile {
     file
 }
 
-/// Enqueues `event` in the outbox the way the importer does.
+/// Enqueues `event` in the outbox the way the importer does, for a fresh archive account.
 pub(crate) async fn enqueue(pool: &sqlx::PgPool, event: &NormalizedArchiveEvent) {
+    let account = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO chatgpt_archive.accounts (id, external_kind, external_ref)
+         VALUES ($1, 'personal', $2)",
+    )
+    .bind(account)
+    .bind(format!("outbox-helper-{account}"))
+    .execute(pool)
+    .await
+    .expect("the account is inserted");
     let mut transaction = pool.begin().await.expect("a transaction");
     ratatoskr_chatgpt_archive::Database::enqueue_normalized_event(
         &mut transaction,
         event,
-        &ratatoskr_chatgpt_archive::OutboxPlacement::default(),
+        &ratatoskr_chatgpt_archive::OutboxPlacement {
+            account_id: Some(account),
+            ..ratatoskr_chatgpt_archive::OutboxPlacement::default()
+        },
     )
     .await
     .expect("the event is enqueued");

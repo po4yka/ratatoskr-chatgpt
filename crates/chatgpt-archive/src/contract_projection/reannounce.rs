@@ -13,6 +13,8 @@ use ratatoskr_ai_archive_contracts::{
     ParserVersion,
 };
 use ratatoskr_identifiers::{BlobRef, Extensions, TenantRef, WireTimestamp};
+
+use crate::announced_subjects;
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
@@ -54,8 +56,6 @@ pub(crate) struct Deletion {
     pub(crate) request_id: Uuid,
     /// The archive account the rows belong to.
     pub(crate) account_id: Uuid,
-    /// The Platform owner of every fact.
-    pub(crate) owner: TenantRef,
     /// The instant of the archive tombstones; every fact is stamped after it.
     pub(crate) tombstoned_at: WireTimestamp,
 }
@@ -136,23 +136,31 @@ async fn retained_under_deleted(
 struct RetainedImport {
     export_id: Uuid,
     archive_id: Uuid,
+    /// The owner the retained archive was announced under (XR-021 CONTRACTS.md R5-06 rule 3).
+    owner: TenantRef,
     source_export: BlobRef,
     imported_at: WireTimestamp,
     parser: Option<(ParserName, ParserVersion)>,
 }
 
 impl RetainedImport {
+    /// `None` when the retained archive was never announced: it has no owner to announce under,
+    /// and nothing it holds is known to Knowledge.
     async fn load(
         transaction: &mut Tx<'_>,
         export_id: Uuid,
         deletion: &Deletion,
-    ) -> Result<Self, ProjectionError> {
+    ) -> Result<Option<Self>, ProjectionError> {
         let (archive_id, blob_ref): (Uuid, serde_json::Value) = sqlx::query_as(
             "SELECT ai_archive_id, blob_ref FROM chatgpt_archive.exports WHERE id = $1",
         )
         .bind(export_id)
         .fetch_one(&mut **transaction)
         .await?;
+        let Some(owner) = announced_subjects::owner_of_archive(transaction, archive_id).await?
+        else {
+            return Ok(None);
+        };
         // The instant the import head announced, so the fact agrees with the head it points at.
         let announced: Option<Option<String>> = sqlx::query_scalar(
             "SELECT payload #>> '{payload,imported_at}' FROM chatgpt_archive.outbox_events
@@ -178,25 +186,22 @@ impl RetainedImport {
                 ))
             })
             .transpose()?;
-        Ok(Self {
+        Ok(Some(Self {
             export_id,
             archive_id,
+            owner,
             source_export: serde_json::from_value(blob_ref)?,
             imported_at: announced
                 .flatten()
                 .and_then(|value| WireTimestamp::parse(&value).ok())
                 .unwrap_or(deletion.tombstoned_at),
             parser,
-        })
+        }))
     }
 
     /// The provenance a fact is announced with. The parser that last wrote the record's rows
     /// stamps it when there is one; the retained import's own parser stands in otherwise.
-    fn base(
-        &self,
-        deletion: &Deletion,
-        stamp: Option<(&str, &str)>,
-    ) -> Result<AiArchiveProvenance, ProjectionError> {
+    fn base(&self, stamp: Option<(&str, &str)>) -> Result<AiArchiveProvenance, ProjectionError> {
         let (parser_name, parser_version) = match (stamp, &self.parser) {
             (Some((name, version)), _) => (
                 contract_parser_name(name)?,
@@ -208,7 +213,7 @@ impl RetainedImport {
         Ok(AiArchiveProvenance {
             ai_archive_id: ratatoskr_identifiers::AiArchiveId(self.archive_id),
             provider: AiProvider::parse("chatgpt").map_err(|_| ProjectionError::Unrepresentable)?,
-            owner: deletion.owner,
+            owner: self.owner,
             source_export: self.source_export.clone(),
             imported_at: self.imported_at,
             parser_name,
@@ -265,11 +270,10 @@ pub(crate) async fn reannounce(
         let Some(export_id) = earliest_retained(transaction, "project", id).await? else {
             continue;
         };
-        let import = RetainedImport::load(transaction, export_id, deletion).await?;
-        let base = import.base(
-            deletion,
-            stamp.as_ref().map(|(n, v)| (n.as_str(), v.as_str())),
-        )?;
+        let Some(import) = RetainedImport::load(transaction, export_id, deletion).await? else {
+            continue;
+        };
+        let base = import.base(stamp.as_ref().map(|(n, v)| (n.as_str(), v.as_str())))?;
         let ProjectFact {
             project,
             provenance,
@@ -288,12 +292,11 @@ pub(crate) async fn reannounce(
         let Some(export_id) = earliest_retained(transaction, "conversation", id).await? else {
             continue;
         };
-        let import = RetainedImport::load(transaction, export_id, deletion).await?;
+        let Some(import) = RetainedImport::load(transaction, export_id, deletion).await? else {
+            continue;
+        };
         let stamp = row.parser_name.clone().zip(row.parser_version.clone());
-        let base = import.base(
-            deletion,
-            stamp.as_ref().map(|(n, v)| (n.as_str(), v.as_str())),
-        )?;
+        let base = import.base(stamp.as_ref().map(|(n, v)| (n.as_str(), v.as_str())))?;
         let (provenance, conversation) = conversation_fact(transaction, row, &base).await?;
         let event = NormalizedArchiveEvent::conversation_updated(&AiConversationUpdated {
             import_provenance: provenance,

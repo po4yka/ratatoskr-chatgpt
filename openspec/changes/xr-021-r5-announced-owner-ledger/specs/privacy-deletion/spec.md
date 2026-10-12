@@ -1,6 +1,14 @@
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: Tombstones are complete envelopes owned by the Platform user
+
+**Reason**: The owner was resolved from the latest announced fact of the account and the live mapping, which addressed every tombstone of a request to one owner. The announced-subject ledger replaces it (XR-021 CONTRACTS.md R5-06).
+
+**Migration**: Use the requirement below; `downstream_tombstone_unbound` is no longer produced.
+
+## ADDED Requirements
+
+### Requirement: A tombstone goes to every owner its subject was announced under
 
 A user-requested deletion SHALL enqueue, for each deleted archive, conversation and project, one `ai_archive.subject.tombstoned.v1` envelope per distinct owner the announced-subject ledger holds for that subject, addressed to that owner, with reason `user_requested`. The owner SHALL be read from `chatgpt_archive.announced_subjects` inside the row-removal transaction and SHALL NOT be read from the live `PLATFORM_ACCOUNTS` mapping or from outbox envelopes. A subject with no ledger row SHALL emit no tombstone, SHALL NOT report a gap and SHALL NOT fail the request. The ledger rows of a tombstoned subject SHALL be deleted in the same transaction and no other subject's rows SHALL be touched. A tenant deletion SHALL keep unpublished tombstones of earlier requests. Survivors of the deletion SHALL be announced again under the owner of the retained archive's ledger row.
 

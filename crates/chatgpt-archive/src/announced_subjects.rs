@@ -25,6 +25,19 @@ pub(crate) struct AnnouncedSubject {
 }
 
 impl SubjectKind {
+    /// The kind a deletion inventory subject (`archive:<id>`, `conversation:<id>`,
+    /// `project:<id>`) names, and its identity.
+    pub(crate) fn parse_inventory_subject(subject: &str) -> Option<(Self, Uuid)> {
+        let (prefix, id) = subject.split_once(':')?;
+        let kind = match prefix {
+            "archive" => Self::Archive,
+            "conversation" => Self::Conversation,
+            "project" => Self::Project,
+            _ => return None,
+        };
+        Some((kind, Uuid::parse_str(id).ok()?))
+    }
+
     /// The `subject_kind` column value.
     pub(crate) const fn as_column(self) -> &'static str {
         match self {
@@ -55,4 +68,63 @@ pub(crate) async fn record(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+/// The owners one subject was announced under, each with the archive it was announced under, in
+/// a stable order. Empty for a subject that was never announced.
+pub(crate) async fn owners_of(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    kind: SubjectKind,
+    subject_id: Uuid,
+) -> Result<Vec<(TenantRef, Uuid)>, sqlx::Error> {
+    let rows: Vec<(String, Uuid)> = sqlx::query_as(
+        "SELECT owner_ref, ai_archive_id FROM chatgpt_archive.announced_subjects
+         WHERE account_id = $1 AND subject_kind = $2 AND subject_id = $3
+         ORDER BY owner_ref",
+    )
+    .bind(account_id)
+    .bind(kind.as_column())
+    .bind(subject_id.to_string())
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(owner, archive)| Some((TenantRef::parse(&owner).ok()?, archive)))
+        .collect())
+}
+
+/// Deletes the rows of one subject, which a tombstone has just retracted.
+pub(crate) async fn forget(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    kind: SubjectKind,
+    subject_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM chatgpt_archive.announced_subjects
+         WHERE account_id = $1 AND subject_kind = $2 AND subject_id = $3",
+    )
+    .bind(account_id)
+    .bind(kind.as_column())
+    .bind(subject_id.to_string())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// The owner the archive was most recently announced under, when it was announced.
+pub(crate) async fn owner_of_archive(
+    transaction: &mut Transaction<'_, Postgres>,
+    ai_archive_id: Uuid,
+) -> Result<Option<TenantRef>, sqlx::Error> {
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT owner_ref FROM chatgpt_archive.announced_subjects
+         WHERE subject_kind = 'archive' AND subject_id = $1
+         ORDER BY announced_at DESC, owner_ref DESC LIMIT 1",
+    )
+    .bind(ai_archive_id.to_string())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(owner.and_then(|raw| TenantRef::parse(&raw).ok()))
 }

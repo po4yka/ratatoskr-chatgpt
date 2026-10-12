@@ -10,16 +10,16 @@
 //! yet erased is listed in a durable item.
 
 use ratatoskr_ai_archive_contracts::AiArchiveTombstone;
-use ratatoskr_identifiers::{BlobRef, CorrelationId, WireTimestamp};
+use ratatoskr_identifiers::{BlobRef, CorrelationId, TenantRef, WireTimestamp};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use super::execution::DurableRequest;
-use super::owner::{TombstoneOwner, owner_for_deletion};
 use super::restore::restore_retained_versions;
 use super::service::{
     FinalizationFault, PrivacyDeletionError, PrivacyDeletionService, lock_tenant,
 };
+use crate::announced_subjects::{self, SubjectKind};
 use crate::contract_projection::{
     Deletion, Survivors, find_survivors as find_survivors_in, reannounce,
 };
@@ -27,9 +27,6 @@ use crate::pg_instant::database_now;
 use crate::{NormalizedArchiveEvent, OutboxPlacement};
 
 type Tx<'a> = Transaction<'a, Postgres>;
-
-/// Item state of a tombstone that could not be queued for lack of a Platform owner.
-pub(super) const UNBOUND_ERROR_CODE: &str = "downstream_tombstone_unbound";
 
 /// Runs phase A. Returns once the rows are gone and the request is `purging`, or
 /// immediately when another executor already completed this phase.
@@ -52,16 +49,6 @@ pub(super) async fn remove_rows(
         transaction.rollback().await?;
         return Ok(());
     }
-    // The owner is read from the announced facts BEFORE the outbox rows of the deleted exports
-    // and the account row can be deleted (XR-021 CONTRACTS.md R4-04).
-    let owner = owner_for_deletion(
-        &mut transaction,
-        &service.owners,
-        durable.tenant_id,
-        request_id,
-    )
-    .await?;
-
     delete_uuid_category(
         &mut transaction,
         request_id,
@@ -76,6 +63,9 @@ pub(super) async fn remove_rows(
     // Before the rows go: a survivor's latest fact is an outbox row that the removal takes with
     // the deleted export (XR-021 CONTRACTS.md R3-06).
     let survivors = find_survivors(&mut transaction, request_id).await?;
+    // The ledger is read before the rows go: a tenant-scope deletion removes the account, and the
+    // ledger rows of an account go with it (XR-021 CONTRACTS.md R5-06).
+    let announcements = read_announcements(&mut transaction, durable.tenant_id, request_id).await?;
     delete_scoped_rows(&mut transaction, request_id, durable.tenant_id).await?;
     // A survivor must hold only what a retained export holds, before it is announced again.
     restore_retained_versions(&mut transaction, durable.tenant_id).await?;
@@ -84,18 +74,17 @@ pub(super) async fn remove_rows(
         &mut transaction,
         durable,
         request_id,
-        owner,
+        &announcements,
         evidence_ref,
         removed_at,
     )
     .await?;
-    if let Some(owner) = owner.known().filter(|_| !survivors.is_empty()) {
+    if !survivors.is_empty() {
         reannounce(
             &mut transaction,
             &Deletion {
                 request_id,
                 account_id: durable.tenant_id,
-                owner,
                 tombstoned_at: removed_at,
             },
             &survivors,
@@ -357,23 +346,23 @@ pub(super) async fn blob_is_referenced(
     .await
 }
 
-/// Queues one tombstone envelope per downstream subject, in the same transaction as
-/// the row removal.
-///
-/// An account that announced facts but yields no Platform owner queues nothing: the
-/// tombstone would name an owner Knowledge cannot match. The skip is made visible instead
-/// of silent. The item is marked failed with a fixed code, and the completion report
-/// counts it as `downstream_tombstone_unbound`. It never blocks the deletion. An account
-/// that announced nothing has nothing for Knowledge to retract, so its items finish
-/// without a row and without a gap.
-async fn insert_tombstones(
+/// A tombstone subject of the request and the owners the ledger holds for it.
+struct Announcement {
+    /// The inventory subject, `<kind>:<id>`.
+    subject: String,
+    kind: SubjectKind,
+    subject_id: Uuid,
+    /// Each owner the subject was announced under, with the archive it was announced under.
+    owners: Vec<(TenantRef, Uuid)>,
+}
+
+/// Reads, for every tombstone subject of the request, the owners the announced-subject ledger
+/// holds. A subject that was never announced has none.
+async fn read_announcements(
     transaction: &mut Tx<'_>,
-    durable: &DurableRequest,
+    tenant_id: Uuid,
     request_id: Uuid,
-    owner: TombstoneOwner,
-    evidence_ref: &BlobRef,
-    observed_at: WireTimestamp,
-) -> Result<(), PrivacyDeletionError> {
+) -> Result<Vec<Announcement>, PrivacyDeletionError> {
     let subjects: Vec<String> = sqlx::query_scalar(
         "SELECT opaque_id FROM chatgpt_archive.privacy_deletion_items
          WHERE request_id = $1 AND category = 'downstream_tombstone'
@@ -382,99 +371,103 @@ async fn insert_tombstones(
     .bind(request_id)
     .fetch_all(&mut **transaction)
     .await?;
-    let fallback_archive = subjects
-        .iter()
-        .filter_map(|subject| subject.strip_prefix("archive:"))
-        .find_map(|id| Uuid::parse_str(id).ok());
+    let mut announcements = Vec::with_capacity(subjects.len());
+    for subject in subjects {
+        let (kind, subject_id) = SubjectKind::parse_inventory_subject(&subject)
+            .ok_or(PrivacyDeletionError::InvalidInventory)?;
+        let owners =
+            announced_subjects::owners_of(transaction, tenant_id, kind, subject_id).await?;
+        announcements.push(Announcement {
+            subject,
+            kind,
+            subject_id,
+            owners,
+        });
+    }
+    Ok(announcements)
+}
+
+/// Queues one tombstone envelope per downstream subject and owner, in the same transaction as
+/// the row removal.
+///
+/// The owners of a subject are the ones the announced-subject ledger held for it: the Platform
+/// users it was told to Knowledge under (XR-021 CONTRACTS.md R5-06). A subject announced under two
+/// users gets two tombstones, each addressed to its own user and naming the archive it was
+/// announced under. A subject that was never announced has nothing for Knowledge to retract, so
+/// its item finishes without a row and without a gap. The ledger rows of a tombstoned subject go
+/// with it.
+async fn insert_tombstones(
+    transaction: &mut Tx<'_>,
+    durable: &DurableRequest,
+    request_id: Uuid,
+    announcements: &[Announcement],
+    evidence_ref: &BlobRef,
+    observed_at: WireTimestamp,
+) -> Result<(), PrivacyDeletionError> {
     let correlation = durable
         .correlation_id
         .map(|id| CorrelationId(id).as_entity_ref());
-    for subject in subjects {
-        let owner = match owner {
-            TombstoneOwner::Known(owner) => owner,
-            TombstoneOwner::NothingAnnounced => {
-                mark_tombstone(transaction, request_id, &subject, "finalized", None).await?;
-                continue;
+    for announcement in announcements {
+        let Announcement {
+            subject,
+            kind,
+            subject_id,
+            owners,
+        } = announcement;
+        for (owner, archive_id) in owners {
+            let payload: AiArchiveTombstone = serde_json::from_value(serde_json::json!({
+                "ai_archive_id": archive_id,
+                "provider": "chatgpt",
+                "owner": owner,
+                "subject": tombstone_subject(*kind, *subject_id),
+                "reason": "user_requested",
+                "evidence_ref": evidence_ref,
+                "observed_at": observed_at,
+            }))?;
+            let mut event = NormalizedArchiveEvent::tombstoned(&payload)?;
+            if let Some(correlation) = correlation.clone() {
+                event = event.with_correlation(correlation);
             }
-            TombstoneOwner::Unresolvable => {
-                mark_tombstone(
-                    transaction,
-                    request_id,
-                    &subject,
-                    "failed",
-                    Some(UNBOUND_ERROR_CODE),
-                )
-                .await?;
-                continue;
-            }
-        };
-        let (archive_id, subject_json) = tombstone_subject(&subject, fallback_archive)?;
-        let payload: AiArchiveTombstone = serde_json::from_value(serde_json::json!({
-            "ai_archive_id": archive_id,
-            "provider": "chatgpt",
-            "owner": owner,
-            "subject": subject_json,
-            "reason": "user_requested",
-            "evidence_ref": evidence_ref,
-            "observed_at": observed_at,
-        }))?;
-        let mut event = NormalizedArchiveEvent::tombstoned(&payload)?;
-        if let Some(correlation) = correlation.clone() {
-            event = event.with_correlation(correlation);
+            let placement = OutboxPlacement {
+                account_id: Some(durable.tenant_id),
+                export_id: None,
+                deduplication_key: Some(format!("privacy-delete:{request_id}:{subject}:{owner}")),
+            };
+            crate::Database::enqueue_normalized_event(transaction, &event, &placement).await?;
         }
-        let placement = OutboxPlacement {
-            account_id: Some(durable.tenant_id),
-            export_id: None,
-            deduplication_key: Some(format!("privacy-delete:{request_id}:{subject}")),
-        };
-        crate::Database::enqueue_normalized_event(transaction, &event, &placement).await?;
-        mark_tombstone(transaction, request_id, &subject, "finalized", None).await?;
+        announced_subjects::forget(transaction, durable.tenant_id, *kind, *subject_id).await?;
+        mark_tombstone_finalized(transaction, request_id, subject).await?;
     }
     Ok(())
 }
 
-async fn mark_tombstone(
+async fn mark_tombstone_finalized(
     transaction: &mut Tx<'_>,
     request_id: Uuid,
     subject: &str,
-    state: &str,
-    error_code: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE chatgpt_archive.privacy_deletion_items SET state = $3, error_code = $4
+        "UPDATE chatgpt_archive.privacy_deletion_items SET state = 'finalized', error_code = NULL
          WHERE request_id = $1 AND category = 'downstream_tombstone' AND opaque_id = $2",
     )
     .bind(request_id)
     .bind(subject)
-    .bind(state)
-    .bind(error_code)
     .execute(&mut **transaction)
     .await?;
     Ok(())
 }
 
-fn tombstone_subject(
-    subject: &str,
-    fallback_archive: Option<Uuid>,
-) -> Result<(Uuid, serde_json::Value), PrivacyDeletionError> {
-    let parse = |id: &str| Uuid::parse_str(id).map_err(|_| PrivacyDeletionError::InvalidInventory);
-    if let Some(id) = subject.strip_prefix("archive:") {
-        return Ok((parse(id)?, serde_json::json!({"subject_kind": "archive"})));
+/// The contract subject a tombstone of `kind` names.
+fn tombstone_subject(kind: SubjectKind, id: Uuid) -> serde_json::Value {
+    match kind {
+        SubjectKind::Archive => serde_json::json!({"subject_kind": "archive"}),
+        SubjectKind::Conversation => {
+            serde_json::json!({"subject_kind": "conversation", "ai_conversation_id": id})
+        }
+        SubjectKind::Project => {
+            serde_json::json!({"subject_kind": "project", "ai_project_id": id})
+        }
     }
-    let archive = fallback_archive.ok_or(PrivacyDeletionError::InvalidInventory)?;
-    if let Some(id) = subject.strip_prefix("conversation:") {
-        return Ok((
-            archive,
-            serde_json::json!({"subject_kind": "conversation", "ai_conversation_id": parse(id)?}),
-        ));
-    }
-    if let Some(id) = subject.strip_prefix("project:") {
-        return Ok((
-            archive,
-            serde_json::json!({"subject_kind": "project", "ai_project_id": parse(id)?}),
-        ));
-    }
-    Err(PrivacyDeletionError::InvalidInventory)
 }
 
 async fn delete_uuid_category(
