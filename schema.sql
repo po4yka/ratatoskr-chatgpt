@@ -289,6 +289,14 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     -- kept as evidence, never retried, and never makes the service not ready (XR-021
     -- CONTRACTS.md R2-04 rule 2). A transient failure never sets this column.
     undeliverable_at TIMESTAMPTZ,
+    -- Knowledge's acknowledgement of a deletion tombstone (XR-021 CONTRACTS.md R5-11). Only rows
+    -- of `ai_archive.subject.tombstoned.v1` use these four columns. The pump re-sends a published
+    -- tombstone when `next_resend_at` passes and `acknowledged_at` is still null, backing the
+    -- interval off by `resend_count`; the consumer of the acknowledgements sets `acknowledged_at`.
+    acknowledged_at TIMESTAMPTZ,
+    ack_outcome     TEXT CHECK (ack_outcome IN ('applied', 'refused')),
+    resend_count    INTEGER NOT NULL DEFAULT 0,
+    next_resend_at  TIMESTAMPTZ,
     -- The payload is always the complete event envelope. The publisher maps the type to a
     -- subject through a closed table, so a type outside this list could never be delivered.
     CONSTRAINT outbox_event_type_closed CHECK (event_type IN (
@@ -307,6 +315,16 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_deduplication_key_unique
     ON chatgpt_archive.outbox_events (deduplication_key)
     WHERE deduplication_key IS NOT NULL;
+
+-- The pump's resend selection and the acknowledgement lookup touch tombstone rows only.
+CREATE INDEX IF NOT EXISTS outbox_tombstone_resend
+    ON chatgpt_archive.outbox_events (next_resend_at)
+    WHERE event_type = 'ai_archive.subject.tombstoned.v1'
+      AND published_at IS NOT NULL AND acknowledged_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS outbox_tombstone_event_id
+    ON chatgpt_archive.outbox_events ((payload ->> 'event_id'))
+    WHERE event_type = 'ai_archive.subject.tombstoned.v1';
 
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_report_once
     ON chatgpt_archive.outbox_events (event_type, aggregate_id)

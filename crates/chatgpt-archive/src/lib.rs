@@ -57,6 +57,7 @@ pub use persistence::{Database, PersistenceError};
 
 mod announced_subjects;
 mod contract_projection;
+pub mod deletion_ack;
 mod entity_versions;
 mod initial_import;
 mod normalized_persist;

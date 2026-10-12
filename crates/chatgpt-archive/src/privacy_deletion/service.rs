@@ -596,12 +596,13 @@ async fn add_delivery_rows(
     for id in inbox {
         inventory.push("inbox_event", id, DeletionAction::Remove);
     }
-    // An unpublished tombstone is the only record that Knowledge must delete what this
-    // archive no longer holds, so no later deletion may take it with the tenant's rows.
+    // An unacknowledged tombstone is the only record that Knowledge must delete what this
+    // archive no longer holds, and the pump re-sends it until Knowledge acknowledges it, so no
+    // later deletion may take it with the tenant's rows (XR-021 CONTRACTS.md R5-11).
     let outbox: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM chatgpt_archive.outbox_events
          WHERE tenant_id = $1 AND ($2 OR export_id = ANY($3))
-           AND NOT (event_type = 'ai_archive.subject.tombstoned.v1' AND published_at IS NULL)
+           AND NOT (event_type = 'ai_archive.subject.tombstoned.v1' AND acknowledged_at IS NULL)
          ORDER BY id",
     )
     .bind(tenant_id)

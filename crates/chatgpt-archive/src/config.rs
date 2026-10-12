@@ -15,6 +15,8 @@ use secrecy::SecretString;
 use serde::Serialize;
 use sqlx::postgres::PgConnectOptions;
 
+use crate::deletion_ack::TombstoneResend;
+
 const ENV_PREFIX: &str = "RATATOSKR__";
 
 /// The default for [`ReceiptConfig::max_event_bytes`]: below the 8 MiB broker `max_payload` the
@@ -36,6 +38,9 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     /// Archive receipt configuration.
     pub receipt: ReceiptConfig,
+    /// How long a published deletion tombstone waits for Knowledge's acknowledgement before it is
+    /// published again (XR-021 CONTRACTS.md R5-11).
+    pub tombstone: TombstoneResend,
     /// Resource and shutdown limits.
     pub limits: Limits,
 }
@@ -253,6 +258,16 @@ impl Config {
                 rule: "is required",
             });
         }
+        if config.tombstone.cap < config.tombstone.after
+            && !violations.iter().any(|violation| {
+                violation.key == KEY_RESEND_CAP_SECONDS || violation.key == KEY_RESEND_AFTER_SECONDS
+            })
+        {
+            violations.push(Violation {
+                key: KEY_RESEND_CAP_SECONDS.to_owned(),
+                rule: "must be at least RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS",
+            });
+        }
         if !config.receipt.platform_accounts.is_empty()
             && config.receipt.event_bus_url.is_none()
             && !violations
@@ -298,6 +313,10 @@ impl Config {
 const KEY_LISTEN_ADDRESS: &str = "RATATOSKR__ADMIN__LISTEN_ADDRESS";
 const KEY_RECEIPT_LISTEN_ADDRESS: &str = "RATATOSKR__RECEIPT__LISTEN_ADDRESS";
 const KEY_MAX_EVENT_BYTES: &str = "RATATOSKR__RECEIPT__MAX_EVENT_BYTES";
+const KEY_RESEND_AFTER_SECONDS: &str = "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS";
+const KEY_RESEND_CAP_SECONDS: &str = "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS";
+const RESEND_AFTER_RANGE_SECONDS: std::ops::RangeInclusive<u64> = 30..=86_400;
+const RESEND_CAP_MAX_SECONDS: u64 = 604_800;
 const KEY_BLOB_ROOT: &str = "RATATOSKR__STORAGE__BLOB_ROOT";
 const KEY_DATABASE_URL: &str = "RATATOSKR__STORAGE__DATABASE_URL";
 const KEY_LOG_FILTER: &str = "RATATOSKR__TELEMETRY__LOG_FILTER";
@@ -345,6 +364,18 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 config.receipt.max_event_bytes = parsed;
             }
             _ => violations.push(refused("must be an integer from 65536 through 8388608")),
+        },
+        KEY_RESEND_AFTER_SECONDS => match value.parse::<u64>() {
+            Ok(parsed) if RESEND_AFTER_RANGE_SECONDS.contains(&parsed) => {
+                config.tombstone.after = std::time::Duration::from_secs(parsed);
+            }
+            _ => violations.push(refused("must be an integer from 30 through 86400")),
+        },
+        KEY_RESEND_CAP_SECONDS => match value.parse::<u64>() {
+            Ok(parsed) if parsed <= RESEND_CAP_MAX_SECONDS => {
+                config.tombstone.cap = std::time::Duration::from_secs(parsed);
+            }
+            _ => violations.push(refused("must be an integer of at most 604800")),
         },
         KEY_BLOB_ROOT => match parse_absolute_path(value) {
             Ok(path) => config.storage.blob_root = Some(path),
@@ -528,6 +559,7 @@ impl Default for Config {
                 event_bus_url: None,
                 event_bus_nkey_seed_path: None,
             },
+            tombstone: TombstoneResend::default(),
             limits: Limits {
                 database_connections: 8,
                 database_acquire_timeout_ms: 5_000,

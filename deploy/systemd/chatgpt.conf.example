@@ -21,3 +21,7 @@ RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH=/etc/ratatoskr/chatgpt.nkey
 
 # Size limits. The event limit (65536..=8388608) bounds one published `ai_archive.*` envelope; a fact over it is not enqueued and the import is reported as partial. It stays below the broker's `max_payload: 8MB`.
 RATATOSKR__RECEIPT__MAX_EVENT_BYTES=8000000
+
+# Deletion tombstones (XR-021 CONTRACTS.md R5-11). A published tombstone is published again, unchanged and under the same message id, until Knowledge acknowledges it; the interval doubles after every resend up to the cap. The events stream collapses a repeated message id inside its 120 second duplicate window, so the default of 600 seconds is deliberate and the 30 second minimum exists for tests; a native smoke that wants a second stream copy must set at least 150. The service consumes the acknowledgements from its Edge-provisioned durable `ratatoskr_chatgpt_deletion_acks`, which must exist before the service reports ready. Knowledge being down never makes the service unready: watch the gauges `chatgpt_archive_unacknowledged_tombstones` and `chatgpt_archive_oldest_unacknowledged_tombstone_age_seconds` on the operator listener.
+RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS=600
+RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS=21600

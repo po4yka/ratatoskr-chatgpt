@@ -7,6 +7,8 @@
 //! broker acknowledgement resolves (XR-021 CONTRACTS.md sections S02 and S07).
 
 use ratatoskr_event_envelope::EventEnvelope;
+
+use crate::deletion_ack::{TOMBSTONE_EVENT_TYPE, TombstoneResend};
 use sqlx::Row as _;
 
 /// Subject Platform consumes to project producer operation facts.
@@ -58,6 +60,7 @@ pub(crate) fn connect_options(nkey_seed: &str) -> async_nats::ConnectOptions {
 #[derive(Debug, Clone)]
 pub struct ArchiveEventOutbox {
     pool: sqlx::PgPool,
+    resend: TombstoneResend,
     connection: std::sync::Arc<tokio::sync::Mutex<Option<Connection>>>,
 }
 
@@ -85,8 +88,17 @@ impl ArchiveEventOutbox {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
+            resend: TombstoneResend::default(),
             connection: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Sets how long a published tombstone waits for Knowledge's acknowledgement before it is
+    /// published again (XR-021 CONTRACTS.md R5-11).
+    #[must_use]
+    pub fn with_tombstone_resend(mut self, resend: TombstoneResend) -> Self {
+        self.resend = resend;
+        self
     }
 
     /// Publishes one bounded batch through the pump's broker connection.
@@ -106,6 +118,9 @@ impl ArchiveEventOutbox {
         endpoint: &str,
         nkey_seed_path: &std::path::Path,
     ) -> Result<usize, PublishError> {
+        crate::deletion_ack::refresh_gauges(&self.pool)
+            .await
+            .map_err(PublishError::Database)?;
         let rows = self.pending_rows().await?;
         if rows.is_empty() {
             return Ok(0);
@@ -156,13 +171,19 @@ impl ArchiveEventOutbox {
     }
 
     async fn pending_rows(&self) -> Result<Vec<sqlx::postgres::PgRow>, PublishError> {
+        // First publications, and the published tombstones whose acknowledgement is overdue
+        // (XR-021 CONTRACTS.md R5-11): the second kind is published again, unchanged.
         sqlx::query(
-            "SELECT id, event_type, payload FROM chatgpt_archive.outbox_events
-             WHERE published_at IS NULL AND undeliverable_at IS NULL
-               AND next_attempt_at <= now()
+            "SELECT id, event_type, payload, published_at IS NOT NULL AS resend
+             FROM chatgpt_archive.outbox_events
+             WHERE undeliverable_at IS NULL
+               AND ((published_at IS NULL AND next_attempt_at <= now())
+                    OR (event_type = $2 AND published_at IS NOT NULL
+                        AND acknowledged_at IS NULL AND next_resend_at <= now()))
              ORDER BY id LIMIT $1",
         )
         .bind(BATCH_SIZE)
+        .bind(TOMBSTONE_EVENT_TYPE)
         .fetch_all(&self.pool)
         .await
         .map_err(PublishError::Database)
@@ -205,6 +226,7 @@ impl ArchiveEventOutbox {
             let event_type: String = row.try_get("event_type").map_err(PublishError::Database)?;
             let payload: serde_json::Value =
                 row.try_get("payload").map_err(PublishError::Database)?;
+            let resend: bool = row.try_get("resend").map_err(PublishError::Database)?;
             let subject =
                 subject_for_event_type(&event_type).ok_or(PublishError::UnknownEventType)?;
             let (body, event_id) = stored_envelope(&event_type, &payload)?;
@@ -214,14 +236,22 @@ impl ArchiveEventOutbox {
             }
             match publish_row(&jetstream, subject, &event_id, body).await {
                 Ok(()) => {
-                    self.mark_published(id).await?;
+                    if resend {
+                        self.mark_resent(id).await?;
+                    } else {
+                        self.mark_published(id).await?;
+                    }
                     published += 1;
                 }
                 Err(error) => {
                     if error.is_closed_connection() {
                         connection.mark_closed();
                     }
-                    self.record_failure(id).await?;
+                    if resend {
+                        self.record_resend_failure(id).await?;
+                    } else {
+                        self.record_failure(id).await?;
+                    }
                     first_failure.get_or_insert(error);
                 }
             }
@@ -229,12 +259,56 @@ impl ArchiveEventOutbox {
         first_failure.map_or(Ok(published), Err)
     }
 
+    /// Marks a first publication. A tombstone also schedules its first resend, which is cancelled
+    /// by Knowledge's acknowledgement.
     async fn mark_published(&self, id: i64) -> Result<(), PublishError> {
         sqlx::query(
-            "UPDATE chatgpt_archive.outbox_events SET published_at = now()
+            "UPDATE chatgpt_archive.outbox_events
+             SET published_at = now(),
+                 next_resend_at = CASE WHEN event_type = $2
+                                       THEN now() + make_interval(secs => $3) END
              WHERE id = $1 AND published_at IS NULL",
         )
         .bind(id)
+        .bind(TOMBSTONE_EVENT_TYPE)
+        .bind(self.resend.after.as_secs_f64())
+        .execute(&self.pool)
+        .await
+        .map_err(PublishError::Database)?;
+        Ok(())
+    }
+
+    /// Books a resend: after the n-th resend the next one waits `after * 2^n`, never longer than the
+    /// cap, so the wait doubles every time.
+    async fn mark_resent(&self, id: i64) -> Result<(), PublishError> {
+        sqlx::query(
+            "UPDATE chatgpt_archive.outbox_events
+             SET next_resend_at = now() + make_interval(
+                     secs => least($2::float8 * power(2, least(resend_count + 1, 30)), $3::float8)),
+                 resend_count = resend_count + 1
+             WHERE id = $1 AND acknowledged_at IS NULL",
+        )
+        .bind(id)
+        .bind(self.resend.after.as_secs_f64())
+        .bind(self.resend.cap.as_secs_f64())
+        .execute(&self.pool)
+        .await
+        .map_err(PublishError::Database)?;
+        Ok(())
+    }
+
+    /// A republish the broker did not acknowledge: the row stays as it is and the existing
+    /// failure backoff delays the next attempt. It is not a resend.
+    async fn record_resend_failure(&self, id: i64) -> Result<(), PublishError> {
+        sqlx::query(
+            "UPDATE chatgpt_archive.outbox_events
+             SET attempt_count = attempt_count + 1, last_error = 'not_acknowledged',
+                 next_resend_at = now() + make_interval(
+                     secs => least(power(2, least(attempt_count, 8))::int, $2))
+             WHERE id = $1 AND published_at IS NOT NULL AND acknowledged_at IS NULL",
+        )
+        .bind(id)
+        .bind(MAX_BACKOFF_SECONDS)
         .execute(&self.pool)
         .await
         .map_err(PublishError::Database)?;

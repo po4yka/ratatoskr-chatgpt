@@ -22,18 +22,24 @@ ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive" }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-nats.workspace = true
 http-body-util.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 ratatoskr-ai-archive-contracts.workspace = true
 ratatoskr-chatgpt-archive = { path = "../../crates/chatgpt-archive", features = ["test-support"] }
+nkeys.workspace = true
 ratatoskr-error-contracts.workspace = true
+ratatoskr-event-envelope.workspace = true
+ratatoskr-identifiers.workspace = true
+ratatoskr-operation-contracts.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 

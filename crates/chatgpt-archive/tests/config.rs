@@ -587,3 +587,76 @@ fn the_example_role_file_exists() {
         "no credential belongs in the file; the password is set separately"
     );
 }
+
+// ---- XR-021 CONTRACTS.md R5-11: the tombstone resend interval and cap ----
+
+const RESEND_AFTER: &str = "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS";
+const RESEND_CAP: &str = "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS";
+
+#[test]
+fn the_tombstone_resend_keys_default_and_are_bounded() {
+    let blob = ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs");
+    let config = Config::from_environment(entries(&[blob])).expect("defaults must load");
+    assert_eq!(config.tombstone.after, std::time::Duration::from_mins(10));
+    assert_eq!(config.tombstone.cap, std::time::Duration::from_hours(6));
+
+    for (after, cap) in [("30", "30"), ("86400", "86400"), ("900", "604800")] {
+        let config =
+            Config::from_environment(entries(&[blob, (RESEND_AFTER, after), (RESEND_CAP, cap)]))
+                .expect("values inside the ranges must load");
+        assert_eq!(config.tombstone.after.as_secs().to_string(), after);
+        assert_eq!(config.tombstone.cap.as_secs().to_string(), cap);
+    }
+
+    for refused in ["29", "86401", "-1", "soon"] {
+        let error = Config::from_environment(entries(&[blob, (RESEND_AFTER, refused)]))
+            .expect_err("an interval outside 30..=86400 must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == RESEND_AFTER),
+            "the violation names the key: {error}"
+        );
+        assert!(
+            !error.to_string().contains(refused),
+            "the supplied value is never rendered"
+        );
+    }
+    for refused in ["604801", "-1", "later"] {
+        let error = Config::from_environment(entries(&[blob, (RESEND_CAP, refused)]))
+            .expect_err("a cap above 604800 must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == RESEND_CAP),
+            "the violation names the key: {error}"
+        );
+    }
+}
+
+#[test]
+fn the_tombstone_resend_cap_may_not_undercut_the_interval() {
+    let blob = ("RATATOSKR__STORAGE__BLOB_ROOT", "/tmp/chatgpt-blobs");
+    let error =
+        Config::from_environment(entries(&[blob, (RESEND_AFTER, "900"), (RESEND_CAP, "600")]))
+            .expect_err("a cap below the interval must be refused");
+    assert!(
+        error.violations.iter().any(|violation| {
+            violation.key == RESEND_CAP && violation.rule.contains(RESEND_AFTER)
+        }),
+        "the violation names both keys: {error}"
+    );
+
+    // The default cap, 21600, is below an interval of 30000.
+    let error = Config::from_environment(entries(&[blob, (RESEND_AFTER, "30000")]))
+        .expect_err("an interval above the default cap needs a larger cap");
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| violation.key == RESEND_CAP),
+        "the violation names the cap key: {error}"
+    );
+}

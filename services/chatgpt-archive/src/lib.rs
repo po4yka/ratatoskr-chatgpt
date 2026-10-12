@@ -10,6 +10,7 @@
 //! SIGTERM or SIGINT, drain within the configured bound, shut telemetry down,
 //! exit 0.
 
+mod deletion_acks;
 mod lifecycle_commands;
 mod listeners;
 
@@ -488,6 +489,10 @@ pub enum ServiceError {
     /// service reports not ready and exits instead of serving with events stuck.
     #[error("the archive event publisher stopped on a row it cannot deliver")]
     EventPublisherStopped,
+    /// The consumer of Knowledge's deletion acknowledgements stopped without a shutdown request.
+    /// The service exits instead of serving with tombstones that can never be acknowledged.
+    #[error("the deletion acknowledgement consumer stopped without a shutdown request")]
+    DeletionAckConsumerStopped,
 }
 
 /// Resolves when SIGINT or SIGTERM arrives.
@@ -655,7 +660,7 @@ fn start_operation_reporter(
         "archive event publisher unavailable",
     );
     Some(tokio::spawn(archive_event_loop(
-        ArchiveEventOutbox::new(database.pool().clone()),
+        ArchiveEventOutbox::new(database.pool().clone()).with_tombstone_resend(config.tombstone),
         endpoint.expose_secret().to_owned(),
         nkey_seed_path.clone(),
         ready,
@@ -687,6 +692,7 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     let publisher_stopped = fatal_tx.subscribe();
     let mut outbox_task = None;
     let mut import_task = None;
+    let mut ack_task = None;
 
     // Prepare the archive root before anything can write into it.
     let root = config
@@ -748,6 +754,13 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
             fatal_tx.clone(),
             shutdown_rx.clone(),
         );
+        ack_task = deletion_acks::start(
+            &database,
+            config,
+            &state,
+            fatal_tx.clone(),
+            shutdown_rx.clone(),
+        );
     }
 
     let operator_app = admin_router(Arc::clone(&state), move || metrics_handle.render());
@@ -762,12 +775,33 @@ pub async fn run(config: &Config) -> Result<(), ServiceError> {
     )
     .await?;
 
-    await_background_tasks(
+    finish_background_tasks(
         Duration::from_millis(config.limits.shutdown_timeout_ms),
         [outbox_task, import_task],
+        ack_task,
+        &publisher_stopped,
     )
-    .await;
+    .await
+}
 
+/// Waits for the background tasks and turns a task that stopped on its own into the service's
+/// exit error.
+async fn finish_background_tasks(
+    bound: Duration,
+    tasks: [Option<tokio::task::JoinHandle<()>>; 2],
+    ack_task: Option<deletion_acks::AckTask>,
+    publisher_stopped: &tokio::sync::watch::Receiver<bool>,
+) -> Result<(), ServiceError> {
+    let (ack_handle, ack_failed) = match ack_task {
+        Some(task) => (Some(task.handle), Some(task.failed)),
+        None => (None, None),
+    };
+    let [outbox_task, import_task] = tasks;
+    await_background_tasks(bound, [outbox_task, import_task, ack_handle]).await;
+
+    if ack_failed.is_some_and(|failed| failed.load(std::sync::atomic::Ordering::Acquire)) {
+        return Err(ServiceError::DeletionAckConsumerStopped);
+    }
     if *publisher_stopped.borrow() {
         return Err(ServiceError::EventPublisherStopped);
     }
