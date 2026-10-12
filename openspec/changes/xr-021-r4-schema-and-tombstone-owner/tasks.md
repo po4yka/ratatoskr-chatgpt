@@ -4,8 +4,8 @@
 
 ## 1. One schema definition (R4-10)
 
-- [ ] 1.1 RED: `tests/persistence_schema.rs` `the_schema_adds_no_column_after_creating_a_table` and `applying_the_schema_twice_emits_no_already_exists_notice` fail on the seven `ALTER TABLE` statements.
-- [ ] 1.2 GREEN: delete the seven statements and the comment above the second block from `schema.sql`.
+- [x] 1.1 RED: `tests/persistence_schema.rs` `the_schema_adds_no_column_after_creating_a_table` failed listing the seven `ALTER TABLE` statements (lines 75, 312, 314, 316, 318, 343, 345), and `applying_the_schema_twice_emits_no_already_exists_notice` failed with 14 `column ... already exists, skipping` notices.
+- [x] 1.2 GREEN: the seven statements and the comment above the second block are deleted from `schema.sql`; both tests pass.
 
 ## 2. The tombstone owner comes from the announced facts (R4-04)
 

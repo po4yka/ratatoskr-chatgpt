@@ -1,6 +1,8 @@
 //! Integration tests for schema application. They skip unless
 //! `CHATGPT_TEST_DATABASE_URL` is set; CI always sets it.
 
+mod common;
+
 use ratatoskr_chatgpt_archive::portable_export::PortableExportFilter;
 use secrecy::SecretString;
 
@@ -409,4 +411,97 @@ async fn run_exists_before_export_and_rejects_unknown_states()
     .await?;
     assert_eq!(recorded, Some((recorded_digest, 42)));
     Ok(())
+}
+
+/// Closes the statement collected so far, keeping it when it adds a column.
+fn close_statement(found: &mut Vec<(usize, String)>, piece: &mut String, line: usize) {
+    let statement = piece.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = statement.to_lowercase();
+    if lowered.contains("alter table") && lowered.contains("add column") {
+        found.push((line, statement));
+    }
+    piece.clear();
+}
+
+/// The line and text of every `ALTER TABLE ... ADD COLUMN` statement in `schema`.
+///
+/// Comments are dropped, statements are cut at `;`, and whitespace is collapsed, so a statement
+/// split across lines still matches. A `DO $$ ... $$` block is cut at its inner `;` too, which is
+/// harmless: only a piece that holds both `alter table` and `add column` counts, and the
+/// constraint additions that close a foreign-key cycle hold neither `add column`.
+fn column_additions(schema: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    let mut piece = String::new();
+    let mut piece_line = 0;
+    for (index, line) in schema.lines().enumerate() {
+        let code = line.split("--").next().unwrap_or_default();
+        for (position, part) in code.split(';').enumerate() {
+            if position > 0 {
+                close_statement(&mut found, &mut piece, piece_line);
+            }
+            if piece.trim().is_empty() && !part.trim().is_empty() {
+                piece_line = index + 1;
+            }
+            piece.push(' ');
+            piece.push_str(part);
+        }
+    }
+    close_statement(&mut found, &mut piece, piece_line);
+    found
+}
+
+/// XR-021 CONTRACTS.md R4-10: the one current definition declares each column in its `CREATE
+/// TABLE`; a column added afterwards is migration code, which the development status forbids.
+///
+/// Sanity check of the scan on the real file before the fix (`git show d994f8b:schema.sql`): it
+/// reports exactly seven statements, at lines 75 (`import_runs.parser_name`), 312, 314, 316 and
+/// 318 (`outbox_events.deduplication_key`, `tenant_id`, `export_id`, `undeliverable_at`) and 343
+/// and 345 (`inbox_events.tenant_id`, `export_id`).
+#[test]
+fn the_schema_adds_no_column_after_creating_a_table() {
+    let schema = include_str!("../../../schema.sql");
+    let found = column_additions(schema);
+    assert!(
+        found.is_empty(),
+        "schema.sql adds columns after creating their tables: {found:#?}"
+    );
+}
+
+/// The scan itself recognises an addition split over lines and ignores a constraint and a comment.
+#[test]
+fn the_column_scan_finds_an_addition_and_skips_everything_else() {
+    let sample = "CREATE TABLE a (id INT);\n\
+        -- ALTER TABLE a ADD COLUMN in_a_comment INT;\n\
+        ALTER TABLE a\n    ADD COLUMN IF NOT EXISTS b INT;\n\
+        DO $$ BEGIN ALTER TABLE a ADD CONSTRAINT c CHECK (id > 0); END $$;\n";
+    let found = column_additions(sample);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].0, 3,
+        "the statement starts at its ALTER TABLE line"
+    );
+}
+
+/// Applying the definition twice to one fresh database makes the server say nothing about a column
+/// that already exists. `CREATE TABLE IF NOT EXISTS` still says a relation exists; only a column
+/// notice betrays an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+#[tokio::test]
+async fn applying_the_schema_twice_emits_no_already_exists_notice() {
+    let logs = common::logs::ThreadLogs::install();
+    let database = common::DisposableDatabase::create().await;
+    database
+        .database
+        .apply_schema()
+        .await
+        .expect("the schema applies a second time");
+    let notices: Vec<String> = logs
+        .take_lines()
+        .into_iter()
+        .filter(|line| line.contains("column") && line.contains("already exists"))
+        .collect();
+    assert!(
+        notices.is_empty(),
+        "an ALTER TABLE re-adds a declared column: {notices:#?}"
+    );
+    database.discard().await;
 }

@@ -72,9 +72,6 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.platform_operation_imports (
     reported_at       TIMESTAMPTZ
 );
 
-ALTER TABLE chatgpt_archive.import_runs
-    ADD COLUMN IF NOT EXISTS parser_name TEXT;
-
 -- Projects observed in exports; components arrive as later columns/tables, in place.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.projects (
     id                 UUID PRIMARY KEY,
@@ -307,17 +304,6 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.outbox_events (
     ))
 );
 
--- Existing development databases are disposable, but repeatable application
--- of the one current definition still adds a newly declared nullable column.
-ALTER TABLE chatgpt_archive.outbox_events
-    ADD COLUMN IF NOT EXISTS deduplication_key TEXT;
-ALTER TABLE chatgpt_archive.outbox_events
-    ADD COLUMN IF NOT EXISTS tenant_id UUID;
-ALTER TABLE chatgpt_archive.outbox_events
-    ADD COLUMN IF NOT EXISTS export_id UUID;
-ALTER TABLE chatgpt_archive.outbox_events
-    ADD COLUMN IF NOT EXISTS undeliverable_at TIMESTAMPTZ;
-
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_deduplication_key_unique
     ON chatgpt_archive.outbox_events (deduplication_key)
     WHERE deduplication_key IS NOT NULL;
@@ -339,11 +325,6 @@ CREATE TABLE IF NOT EXISTS chatgpt_archive.inbox_events (
     processed_at  TIMESTAMPTZ,
     UNIQUE (source, event_type, event_key)
 );
-
-ALTER TABLE chatgpt_archive.inbox_events
-    ADD COLUMN IF NOT EXISTS tenant_id UUID;
-ALTER TABLE chatgpt_archive.inbox_events
-    ADD COLUMN IF NOT EXISTS export_id UUID;
 
 -- Durable, tenant-owned privacy workflow state. The tenant identity remains
 -- after tenant erasure as an opaque internal UUID, so these rows deliberately
