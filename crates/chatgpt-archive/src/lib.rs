@@ -55,6 +55,7 @@ pub mod persistence;
 
 pub use persistence::{Database, PersistenceError};
 
+mod announced_subjects;
 mod contract_projection;
 mod entity_versions;
 mod initial_import;

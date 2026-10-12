@@ -312,6 +312,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_report_once
     ON chatgpt_archive.outbox_events (event_type, aggregate_id)
     WHERE event_type = 'platform.operation.reported.v1';
 
+-- The owner each announced subject was told to Knowledge under (XR-021 CONTRACTS.md R5-06). A row
+-- is written in the transaction that enqueues the fact announcing the subject, so a deletion
+-- addresses its tombstones to the owner the subject was announced under and never to the live
+-- Platform account mapping. There is deliberately no reference to `exports`: deleting an export
+-- must not remove the record of what was announced. The rows of an account go with the account.
+CREATE TABLE IF NOT EXISTS chatgpt_archive.announced_subjects (
+    subject_kind  TEXT NOT NULL CHECK (subject_kind IN ('archive', 'conversation', 'project')),
+    subject_id    TEXT NOT NULL,
+    ai_archive_id UUID NOT NULL,
+    owner_ref     TEXT NOT NULL CHECK (owner_ref ~ '^user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'),
+    account_id    UUID NOT NULL REFERENCES chatgpt_archive.accounts (id) ON DELETE CASCADE,
+    announced_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (subject_kind, subject_id, owner_ref)
+);
+
 -- Inbox deduplication: event identity seen from other bounded contexts.
 CREATE TABLE IF NOT EXISTS chatgpt_archive.inbox_events (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -4,8 +4,8 @@
 
 ## 1. The ledger
 
-- [ ] 1.1 RED: `tests/announced_subjects.rs` (real PostgreSQL) fails on its assertions with a stub `announced_subjects::record` that inserts nothing: an import under mapping A leaves no ledger rows for the archive, the conversation and the project; a reparse that changes one digest adds nothing for an unchanged subject; an unmapped account writes no row; deleting an export does not remove the rows.
-- [ ] 1.2 GREEN: the table in `schema.sql`, `announced_subjects::record` called from `enqueue_normalized_event`; the tests pass.
+- [x] 1.1 RED: `tests/announced_subjects.rs` (real PostgreSQL) fails on its assertions with a stub `announced_subjects::record` that inserts nothing: an import under mapping A leaves no ledger rows for the archive, the conversation and the project; a reparse that changes one digest adds nothing for an unchanged subject; an unmapped account writes no row; deleting an export does not remove the rows.
+- [x] 1.2 GREEN: the table in `schema.sql`, `announced_subjects::record` called from `enqueue_normalized_event`; the tests pass.
 
 ## 2. One tombstone per owner
 

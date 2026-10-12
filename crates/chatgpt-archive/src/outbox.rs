@@ -15,6 +15,7 @@ use ratatoskr_identifiers::{
 use uuid::Uuid;
 
 use crate::Database;
+use crate::announced_subjects::{self, AnnouncedSubject, SubjectKind};
 
 /// The deployable that asserts every archive fact.
 const PRODUCER: &str = "ratatoskr-chatgpt";
@@ -28,6 +29,9 @@ pub struct NormalizedArchiveEvent {
     pub aggregate_id: Uuid,
     /// The complete envelope the bus carries.
     pub envelope: EventEnvelope,
+    /// The subject this fact announces to Knowledge, recorded in the announced-subject ledger in
+    /// the transaction that enqueues it (XR-021 CONTRACTS.md R5-06).
+    announced: Option<AnnouncedSubject>,
 }
 
 /// Where an outbox row belongs, beyond the event itself.
@@ -57,6 +61,9 @@ pub enum OutboxError {
     /// The envelope could not be built from the payload.
     #[error("the normalized archive event envelope could not be built")]
     Envelope,
+    /// A fact that announces a subject was enqueued without the account it belongs to.
+    #[error("an announcing archive event needs the account it belongs to")]
+    AnnouncementWithoutAccount,
 }
 
 impl NormalizedArchiveEvent {
@@ -73,6 +80,14 @@ impl NormalizedArchiveEvent {
             payload.imported_at,
             payload,
         )
+        .map(|event| {
+            event.announcing(
+                SubjectKind::Archive,
+                payload.ai_archive_id.0,
+                payload.ai_archive_id.0,
+                payload.owner,
+            )
+        })
     }
 
     /// Constructs a conforming conversation-added event.
@@ -92,6 +107,14 @@ impl NormalizedArchiveEvent {
             payload.import_provenance.imported_at,
             payload,
         )
+        .map(|event| {
+            event.announcing(
+                SubjectKind::Conversation,
+                id.0,
+                payload.import_provenance.ai_archive_id.0,
+                payload.conversation.owner,
+            )
+        })
     }
 
     /// Constructs a conforming conversation-updated event.
@@ -111,6 +134,14 @@ impl NormalizedArchiveEvent {
             payload.import_provenance.imported_at,
             payload,
         )
+        .map(|event| {
+            event.announcing(
+                SubjectKind::Conversation,
+                id.0,
+                payload.import_provenance.ai_archive_id.0,
+                payload.conversation.owner,
+            )
+        })
     }
 
     /// Constructs a conforming project-added event.
@@ -130,6 +161,14 @@ impl NormalizedArchiveEvent {
             payload.import_provenance.imported_at,
             payload,
         )
+        .map(|event| {
+            event.announcing(
+                SubjectKind::Project,
+                id.0,
+                payload.import_provenance.ai_archive_id.0,
+                payload.import_provenance.owner,
+            )
+        })
     }
 
     /// Constructs a conforming project-updated event.
@@ -149,6 +188,14 @@ impl NormalizedArchiveEvent {
             payload.import_provenance.imported_at,
             payload,
         )
+        .map(|event| {
+            event.announcing(
+                SubjectKind::Project,
+                id.0,
+                payload.import_provenance.ai_archive_id.0,
+                payload.import_provenance.owner,
+            )
+        })
     }
 
     /// Constructs an explicit-deletion tombstone event.
@@ -167,6 +214,23 @@ impl NormalizedArchiveEvent {
             payload.observed_at,
             payload,
         )
+    }
+
+    /// Marks the event as the announcement of one subject to Knowledge.
+    fn announcing(
+        mut self,
+        kind: SubjectKind,
+        subject_id: Uuid,
+        ai_archive_id: Uuid,
+        owner: TenantRef,
+    ) -> Self {
+        self.announced = Some(AnnouncedSubject {
+            kind,
+            subject_id,
+            ai_archive_id,
+            owner,
+        });
+        self
     }
 
     /// Stamps the event with the instant it happened instead of the instant of its payload.
@@ -214,6 +278,7 @@ impl NormalizedArchiveEvent {
             event_type: T::EVENT_TYPE,
             aggregate_id,
             envelope,
+            announced: None,
         })
     }
 }
@@ -270,6 +335,15 @@ impl Database {
         .execute(&mut **transaction)
         .await
         .map_err(OutboxError::Store)?;
-        Ok(inserted.rows_affected() == 1)
+        let added = inserted.rows_affected() == 1;
+        if added && let Some(announced) = &event.announced {
+            let account_id = placement
+                .account_id
+                .ok_or(OutboxError::AnnouncementWithoutAccount)?;
+            announced_subjects::record(transaction, announced, account_id)
+                .await
+                .map_err(OutboxError::Store)?;
+        }
+        Ok(added)
     }
 }
