@@ -24,6 +24,10 @@ pub enum PublishError {
     /// A row does not hold the complete envelope of its declared event type.
     #[error("the archive event outbox holds a row that is not a complete envelope")]
     InvalidRow,
+    /// The mark of an acknowledged publication did not land on exactly one row (XR-021
+    /// CONTRACTS.md R6-03 rule 2). The acknowledged copy is carried, never forgotten.
+    #[error("the archive event outbox mark of an acknowledged row did not land")]
+    MarkLost,
 }
 
 impl PublishError {

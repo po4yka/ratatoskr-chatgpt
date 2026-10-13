@@ -224,7 +224,16 @@ impl ArchiveEventOutbox {
                     if resend {
                         self.mark_resent(id).await?;
                     } else {
-                        self.mark_published(id, sequence).await?;
+                        let mut transaction =
+                            self.pool.begin().await.map_err(PublishError::Database)?;
+                        marks::mark_published(
+                            &mut transaction,
+                            id,
+                            &[i64::try_from(sequence).unwrap_or(i64::MAX)],
+                            self.resend.after,
+                        )
+                        .await?;
+                        transaction.commit().await.map_err(PublishError::Database)?;
                     }
                     published += 1;
                 }

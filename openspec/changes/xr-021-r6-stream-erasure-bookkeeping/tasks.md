@@ -9,8 +9,8 @@
 
 ## 2. The mark must land
 
-- [ ] 2.1 RED: unit test in `receipt/outbox/marks.rs` against real PostgreSQL: `mark_published` for a missing or already published row returns `PublishError::MarkLost` and increments `chatgpt_archive_outbox_mark_lost_total` (a signature-only stub of the variant that is never returned makes it fail on the assertion).
-- [ ] 2.2 GREEN: `rows_affected() == 1` is checked, `MarkLost` is returned and counted, and `publish_rows` reports it as a pass failure.
+- [x] 2.1 RED: unit test in `receipt/outbox/marks.rs` against real PostgreSQL: `mark_published` for a missing or already published row returns `PublishError::MarkLost` and increments `chatgpt_archive_outbox_mark_lost_total` (a signature-only stub of the variant that is never returned makes it fail on the assertion).
+- [x] 2.2 GREEN: `rows_affected() == 1` is checked, `MarkLost` is returned and counted, and `publish_rows` reports it as a pass failure.
 
 ## 3. Serialize with the deletion
 
