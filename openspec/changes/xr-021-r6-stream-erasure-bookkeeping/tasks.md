@@ -4,8 +4,8 @@
 
 ## 1. The array column
 
-- [ ] 1.1 RED: `tests/stream_sequence.rs` selects `published_stream_seqs` as `to_jsonb(o) -> 'published_stream_seqs'`: `a_published_row_records_the_sequence_of_its_stream_message` and `a_duplicate_acknowledgement_adds_no_second_element` fail on their assertions because the column does not exist.
-- [ ] 1.2 GREEN: `schema.sql` column `published_stream_seqs BIGINT[] NOT NULL DEFAULT '{}'`, `mark_published` merges ascending without duplicates, `erasure.rs` reads `unnest(published_stream_seqs)`, every test that named the old column moves to the new one without weakening an assertion.
+- [x] 1.1 RED: `tests/stream_sequence.rs` selects `published_stream_seqs` as `to_jsonb(o) -> 'published_stream_seqs'`: `a_published_row_records_the_sequence_of_its_stream_message` and `a_duplicate_acknowledgement_adds_no_second_element` fail on their assertions because the column does not exist.
+- [x] 1.2 GREEN: `schema.sql` column `published_stream_seqs BIGINT[] NOT NULL DEFAULT '{}'`, `mark_published` merges ascending without duplicates, `erasure.rs` reads `unnest(published_stream_seqs)`, every test that named the old column moves to the new one without weakening an assertion.
 
 ## 2. The mark must land
 

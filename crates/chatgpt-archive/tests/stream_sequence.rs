@@ -1,6 +1,7 @@
-//! The pump records the stream sequence of the broker acknowledgement of every row it publishes
-//! (XR-021 CONTRACTS.md R5-12 rule 2). Every test runs the real pump against a private
-//! `JetStream` broker.
+//! The pump records the stream sequence of every broker acknowledgement of every row it publishes,
+//! in `published_stream_seqs`, ascending and without duplicates (XR-021 CONTRACTS.md R6-03 rule 1,
+//! which replaces R5-12 rule 2). Every test runs the real pump against a private `JetStream`
+//! broker.
 
 #![allow(
     clippy::expect_used,
@@ -29,15 +30,26 @@ async fn events_stream(broker: &PrivateBroker) -> jetstream::stream::Stream {
         .expect("the events stream is created")
 }
 
-async fn recorded_sequence(pool: &sqlx::PgPool, event_id: &str) -> Option<i64> {
+/// The sequences the row records, as JSON, or none when the column does not exist or is null.
+async fn recorded_sequences(pool: &sqlx::PgPool, event_id: &str) -> Option<serde_json::Value> {
     sqlx::query_scalar(
-        "SELECT published_stream_seq FROM chatgpt_archive.outbox_events
+        "SELECT to_jsonb(o) -> 'published_stream_seqs' FROM chatgpt_archive.outbox_events o
          WHERE payload ->> 'event_id' = $1",
     )
     .bind(event_id)
     .fetch_one(pool)
     .await
     .expect("the row is readable")
+}
+
+/// The one sequence a row that was acknowledged once records.
+async fn the_one_sequence(pool: &sqlx::PgPool, event_id: &str) -> i64 {
+    let recorded = recorded_sequences(pool, event_id)
+        .await
+        .expect("a published row records its stream sequences");
+    let sequences = recorded.as_array().expect("the column is an array");
+    assert_eq!(sequences.len(), 1, "one acknowledgement, one element");
+    sequences[0].as_i64().expect("a sequence is an integer")
 }
 
 #[tokio::test]
@@ -56,9 +68,7 @@ async fn a_published_row_records_the_sequence_of_its_stream_message() {
 
     assert_eq!(published, 2);
     for event_id in [&first, &second] {
-        let sequence = recorded_sequence(database.pool(), event_id)
-            .await
-            .expect("a published row records its stream sequence");
+        let sequence = the_one_sequence(database.pool(), event_id).await;
         let message = stream
             .get_raw_message(u64::try_from(sequence).expect("a positive sequence"))
             .await
@@ -120,15 +130,51 @@ async fn a_duplicate_acknowledgement_records_the_original_sequence() {
         .expect("the pump publishes");
 
     assert_eq!(
-        recorded_sequence(database.pool(), &event_id).await,
-        Some(i64::try_from(original.sequence).expect("a small sequence")),
+        the_one_sequence(database.pool(), &event_id).await,
+        i64::try_from(original.sequence).expect("a small sequence"),
         "a duplicate acknowledgement carries the original sequence"
     );
     assert_ne!(
-        recorded_sequence(database.pool(), &other).await,
-        recorded_sequence(database.pool(), &event_id).await,
+        the_one_sequence(database.pool(), &other).await,
+        the_one_sequence(database.pool(), &event_id).await,
         "the next row got a sequence of its own"
     );
     drop(stream);
+    database.discard().await;
+}
+
+#[tokio::test]
+async fn a_second_publication_inside_the_duplicate_window_adds_no_element() {
+    let broker = PrivateBroker::plain();
+    let _stream = events_stream(&broker).await;
+    let database = common::DisposableDatabase::create().await;
+    let event_id = enqueue_tombstone(database.pool()).await;
+    let seed = seed_file();
+    let pump = ArchiveEventOutbox::new(database.pool().clone());
+    pump.publish_pending_once(&broker.url(), seed.path())
+        .await
+        .expect("the pump publishes");
+    let first = the_one_sequence(database.pool(), &event_id).await;
+    // The mark of the first publication is taken back, as if it had never landed: the row is
+    // published again under the same message id, inside the stream's two minute window.
+    sqlx::query(
+        "UPDATE chatgpt_archive.outbox_events
+         SET published_at = NULL, published_stream_seqs = '{}'
+         WHERE payload ->> 'event_id' = $1",
+    )
+    .bind(&event_id)
+    .execute(database.pool())
+    .await
+    .expect("the mark is taken back");
+
+    pump.publish_pending_once(&broker.url(), seed.path())
+        .await
+        .expect("the pump publishes again");
+
+    assert_eq!(
+        recorded_sequences(database.pool(), &event_id).await,
+        Some(serde_json::json!([first])),
+        "the duplicate acknowledgement carries the original sequence and adds nothing"
+    );
     database.discard().await;
 }

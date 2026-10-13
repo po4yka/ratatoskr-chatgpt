@@ -64,10 +64,10 @@ pub(super) async fn drop_published_fact_rows(
         "WITH dropped AS (
            DELETE FROM chatgpt_archive.outbox_events
            WHERE id = ANY($1) OR export_id = ANY($2)
-           RETURNING event_type, payload ->> 'tenant_id' AS owner, published_stream_seq
+           RETURNING event_type, payload ->> 'tenant_id' AS owner, published_stream_seqs
          )
-         SELECT owner, published_stream_seq FROM dropped
-         WHERE event_type = ANY($3) AND owner IS NOT NULL AND published_stream_seq IS NOT NULL",
+         SELECT owner, unnest(published_stream_seqs) FROM dropped
+         WHERE event_type = ANY($3) AND owner IS NOT NULL",
     )
     .bind(outbox_ids)
     .bind(exports)

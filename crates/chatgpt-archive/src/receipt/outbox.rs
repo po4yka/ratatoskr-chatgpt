@@ -269,7 +269,11 @@ impl ArchiveEventOutbox {
     async fn mark_published(&self, id: i64, sequence: u64) -> Result<(), PublishError> {
         sqlx::query(
             "UPDATE chatgpt_archive.outbox_events
-             SET published_at = now(), published_stream_seq = $4,
+             SET published_at = now(),
+                 published_stream_seqs = ARRAY(
+                     SELECT DISTINCT sequence
+                     FROM unnest(published_stream_seqs || $4::bigint) AS sequence
+                     ORDER BY sequence),
                  next_resend_at = CASE WHEN event_type = $2
                                        THEN now() + make_interval(secs => $3) END
              WHERE id = $1 AND published_at IS NULL",

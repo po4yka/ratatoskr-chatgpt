@@ -41,7 +41,8 @@ async fn publish_as_the_pump_does(pool: &sqlx::PgPool) -> Vec<(i64, i64)> {
     .await
     .expect("the outbox is readable");
     let base: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(max(published_stream_seq), 0) FROM chatgpt_archive.outbox_events",
+        "SELECT COALESCE(max(sequence), 0)
+         FROM chatgpt_archive.outbox_events, unnest(published_stream_seqs) AS sequence",
     )
     .fetch_one(pool)
     .await
@@ -51,7 +52,7 @@ async fn publish_as_the_pump_does(pool: &sqlx::PgPool) -> Vec<(i64, i64)> {
         let sequence = base + 1 + i64::try_from(offset).expect("a small offset");
         sqlx::query(
             "UPDATE chatgpt_archive.outbox_events
-             SET published_at = now(), published_stream_seq = $2 WHERE id = $1",
+             SET published_at = now(), published_stream_seqs = ARRAY[$2]::bigint[] WHERE id = $1",
         )
         .bind(id)
         .bind(sequence)
@@ -171,8 +172,8 @@ async fn a_tenant_deletion_covers_every_fact_by_owner_and_never_a_tombstone_or_a
     // own, are removed by the deletion but are never listed for erasure.
     sqlx::query(
         "INSERT INTO chatgpt_archive.outbox_events
-         (event_type, aggregate_id, tenant_id, payload, published_at, published_stream_seq)
-         VALUES ('platform.operation.reported.v1', $1, $2, $3, now(), 900)",
+         (event_type, aggregate_id, tenant_id, payload, published_at, published_stream_seqs)
+         VALUES ('platform.operation.reported.v1', $1, $2, $3, now(), ARRAY[900]::bigint[])",
     )
     .bind(Uuid::now_v7())
     .bind(first.account)
@@ -182,9 +183,10 @@ async fn a_tenant_deletion_covers_every_fact_by_owner_and_never_a_tombstone_or_a
     .expect("the report is inserted");
     sqlx::query(
         "INSERT INTO chatgpt_archive.outbox_events
-         (event_type, aggregate_id, tenant_id, payload, published_at, published_stream_seq,
+         (event_type, aggregate_id, tenant_id, payload, published_at, published_stream_seqs,
           acknowledged_at, ack_outcome)
-         VALUES ('ai_archive.subject.tombstoned.v1', $1, $2, $3, now(), 901, now(), 'applied')",
+         VALUES ('ai_archive.subject.tombstoned.v1', $1, $2, $3, now(), ARRAY[901]::bigint[], now(),
+                 'applied')",
     )
     .bind(Uuid::now_v7())
     .bind(first.account)
@@ -230,7 +232,7 @@ async fn an_unpublished_fact_adds_no_sequence_and_no_command() {
         .await;
     sqlx::query(
         "UPDATE chatgpt_archive.outbox_events
-         SET published_at = now(), published_stream_seq = 7
+         SET published_at = now(), published_stream_seqs = ARRAY[7]::bigint[]
          WHERE id = (SELECT min(id) FROM chatgpt_archive.outbox_events
                      WHERE event_type = 'ai_archive.archive.imported.v1')",
     )
@@ -386,7 +388,7 @@ async fn the_pump_publishes_the_command_and_a_platform_handler_erases_only_the_n
         .await
         .expect("the pump publishes the facts");
     let recorded: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT payload ->> 'tenant_id', published_stream_seq
+        "SELECT payload ->> 'tenant_id', published_stream_seqs[1]
          FROM chatgpt_archive.outbox_events ORDER BY id",
     )
     .fetch_all(fixture.database.pool())
