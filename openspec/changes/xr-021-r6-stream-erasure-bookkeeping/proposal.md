@@ -1,0 +1,16 @@
+## Why
+
+XR-021 CONTRACTS.md R6-03. Round 5 (R5-12) made a deletion ask Edge to erase the stream copy of every published fact it removes, but the bookkeeping behind it has three holes. The pump selects a batch with a plain `SELECT`, publishes, and then marks the row with one sequence, ignoring `rows_affected`. (a) A row selected before a deletion removes it is still published, and its sequence is never captured. (b) A PubAck whose mark did not land leaves the row unpublished, and a republish after the 120 s duplicate window is a second copy whose sequence replaces the first. (c) A deletion that commits between the PubAck and the mark removes a row that has no recorded sequence. In every case content of a deleted subject stays in `ratatoskr_events` with no command that names it.
+
+## What Changes
+
+- `outbox_events.published_stream_seq bigint` becomes `published_stream_seqs bigint[] not null default '{}'`: the sequence of every PubAck the pump received for the row, ascending, without duplicates.
+- The first publication of a row is one short transaction per row: `select ... for update skip locked`, publish, mark, commit. A deletion that meets the lock waits for the pump (bounded by the JetStream request timeout, which the pump now sets to 5 s) and then deletes the committed row, which carries its sequences. A row deleted before the lock is never published.
+- The mark must affect exactly one row; anything else is the new `PublishError::MarkLost` and increments `chatgpt_archive_outbox_mark_lost_total`.
+- A PubAck whose commit failed is carried in memory and merged into `published_stream_seqs` by the next successful mark of that row. At the start of every pass, a carried entry whose row no longer exists is a copy no deletion knew about: the pump enqueues the erasure command itself, with `request_ref` `privacy_request:<event id of the orphaned row>`, through the function a deletion uses.
+- `DEVELOPMENT.md` documents the protocol and the one residual that remains.
+- `PublishProbe` is a test seam (never set in production) that pauses the pump after the candidates are chosen and after the PubAck, and fails one commit.
+
+## Impact
+
+Touches `schema.sql`, `crates/chatgpt-archive/src/{receipt/outbox/*, receipt/probe.rs, stream_erasure.rs, privacy_deletion/erasure.rs}`, the tests that name the old column, `README.md` and `DEVELOPMENT.md`. Cites XR-021 CONTRACTS.md R6-03 (it replaces R5-12 rule 2 "a new column `published_stream_seq bigint`" and the order "collects its `published_stream_seq` values BEFORE the delete" for the in-flight cases). Round 6 has no contracts commit: every `ratatoskr-*` dependency stays at `d98967b7b7ee80442c93ef4657140068955c8f61`, and the erasure command and Edge's handler do not change. Deliberate break: the column `published_stream_seq` is gone, with no migration and no compatibility shim (Development status). The pump now holds one pool connection while a first publication is in flight. One residual stays and is named in `DEVELOPMENT.md`: a crash between the broker's PubAck and the commit, followed by a republish after the 120 s duplicate window, leaves one stream copy no record names; it ages out at 7 days or 1 GiB, and closing it needs Edge to find a message by `Nats-Msg-Id` (a contract addition, not done, recorded as R6-05).
