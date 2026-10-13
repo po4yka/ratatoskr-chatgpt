@@ -6,18 +6,18 @@
 //! table, publishes the stored document unchanged, and marks the row only after the
 //! broker acknowledgement resolves (XR-021 CONTRACTS.md sections S02 and S07).
 
+mod carry;
 mod error;
 mod marks;
+mod publish;
 mod subject;
 
 pub use error::PublishError;
-pub(crate) use subject::subject_for_event_type;
-
-use sqlx::Row as _;
 
 use crate::deletion_ack::{TOMBSTONE_EVENT_TYPE, TombstoneResend};
+use crate::receipt::probe::{PublishPause, PublishProbe};
 
-use subject::{publish_row, stored_envelope};
+use carry::Carry;
 
 /// Room kept below the broker's `max_payload` for headers and framing (XR-021 CONTRACTS.md R2-04
 /// rule 2).
@@ -28,6 +28,13 @@ const CLASS_PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 /// `_INBOX_chatgpt.>`, so every connection it opens must set it (XR-021 CONTRACTS.md R3-01);
 /// without it a publish acknowledgement is never delivered and the call times out.
 pub(crate) const INBOX_PREFIX: &str = "_INBOX_chatgpt";
+/// How long the pump waits for the broker, and so the longest it holds a row lock while a first
+/// publication is in flight (XR-021 CONTRACTS.md R6-03 rule 2). It is set explicitly on the
+/// pump's `JetStream` context instead of inheriting the library default, because a change of that
+/// default would silently change how long a deletion can wait behind the pump. Pool consequence:
+/// the pump holds one database connection for the whole of that window, so the pool must keep a
+/// connection free for the deletion that waits.
+pub(crate) const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BATCH_SIZE: i64 = 32;
 const MAX_BACKOFF_SECONDS: i32 = 300;
 
@@ -47,6 +54,8 @@ pub struct ArchiveEventOutbox {
     pool: sqlx::PgPool,
     resend: TombstoneResend,
     connection: std::sync::Arc<tokio::sync::Mutex<Option<Connection>>>,
+    probe: Option<std::sync::Arc<PublishProbe>>,
+    carry: Carry,
 }
 
 /// The broker connection of the pump and whether its client has been closed.
@@ -75,6 +84,22 @@ impl ArchiveEventOutbox {
             pool,
             resend: TombstoneResend::default(),
             connection: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            probe: None,
+            carry: Carry::default(),
+        }
+    }
+
+    /// Holds the pump at the named points of `probe`. A test seam: production never sets one
+    /// (XR-021 CONTRACTS.md R6-03 rule 7).
+    #[must_use]
+    pub fn with_publish_probe(mut self, probe: std::sync::Arc<PublishProbe>) -> Self {
+        self.probe = Some(probe);
+        self
+    }
+
+    async fn pause_at(&self, point: PublishPause) {
+        if let Some(probe) = &self.probe {
+            probe.pause_at(point).await;
         }
     }
 
@@ -106,12 +131,14 @@ impl ArchiveEventOutbox {
         crate::deletion_ack::refresh_gauges(&self.pool)
             .await
             .map_err(PublishError::Database)?;
-        let rows = self.pending_rows().await?;
-        if rows.is_empty() {
+        self.reconcile_carried().await?;
+        let candidates = self.pending_rows().await?;
+        if candidates.is_empty() {
             return Ok(0);
         }
+        self.pause_at(PublishPause::AfterCandidates).await;
         let connection = self.connection(endpoint, nkey_seed_path).await?;
-        self.publish_rows(&connection, rows).await
+        self.publish_rows(&connection, candidates).await
     }
 
     /// Drains the pump's connection so queued publishes are flushed before the service
@@ -155,11 +182,12 @@ impl ArchiveEventOutbox {
         Ok(connection)
     }
 
-    async fn pending_rows(&self) -> Result<Vec<sqlx::postgres::PgRow>, PublishError> {
+    async fn pending_rows(&self) -> Result<Vec<Candidate>, PublishError> {
         // First publications, and the published tombstones whose acknowledgement is overdue
-        // (XR-021 CONTRACTS.md R5-11): the second kind is published again, unchanged.
-        sqlx::query(
-            "SELECT id, event_type, payload, published_at IS NOT NULL AS resend
+        // (XR-021 CONTRACTS.md R5-11): the second kind is published again, unchanged. The batch is
+        // chosen without a lock; a first publication takes its row lock later, one row at a time.
+        let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+            "SELECT id, event_type, payload, tenant_id, published_at IS NOT NULL AS resend
              FROM chatgpt_archive.outbox_events
              WHERE undeliverable_at IS NULL
                AND ((published_at IS NULL AND next_attempt_at <= now())
@@ -171,85 +199,32 @@ impl ArchiveEventOutbox {
         .bind(TOMBSTONE_EVENT_TYPE)
         .fetch_all(&self.pool)
         .await
-        .map_err(PublishError::Database)
+        .map_err(PublishError::Database)?;
+        rows.iter().map(Candidate::read).collect()
     }
+}
 
-    /// Publishes `rows` in id order and marks only broker-acknowledged rows.
-    ///
-    /// Each message is named by its envelope `event_id`, so a crash after
-    /// acknowledgement but before the SQL update redelivers a message the stream
-    /// collapses, and the key space cannot collide with another producer's. A row the
-    /// broker did not acknowledge stays unpublished, records a safe failure class and
-    /// waits out a bounded backoff, so one refused row never starves the rows behind
-    /// it. A transient failure never gives a row up. A row larger than the connected
-    /// server accepts can never be delivered: it is marked undeliverable at once,
-    /// skipped from then on, counted, and does not fail the pass, so it neither wedges
-    /// the pump nor flips readiness.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PublishError::UnknownEventType`] or [`PublishError::InvalidRow`]
-    /// for a row this service cannot have produced; both stop the pass without
-    /// publishing that row. Returns [`PublishError::Broker`] when any row was not
-    /// acknowledged. A `PubAck` timeout is indistinguishable from a permission
-    /// denial, so check the NATS server log for a Publish Violation.
-    async fn publish_rows(
-        &self,
-        connection: &Connection,
-        rows: Vec<sqlx::postgres::PgRow>,
-    ) -> Result<usize, PublishError> {
-        let jetstream = async_nats::jetstream::new(connection.client.clone());
-        let deliverable_bytes = connection
-            .client
-            .server_info()
-            .max_payload
-            .saturating_sub(PAYLOAD_HEADROOM_BYTES);
-        let mut published = 0;
-        let mut first_failure = None;
-        for row in rows {
-            let id: i64 = row.try_get("id").map_err(PublishError::Database)?;
-            let event_type: String = row.try_get("event_type").map_err(PublishError::Database)?;
-            let payload: serde_json::Value =
-                row.try_get("payload").map_err(PublishError::Database)?;
-            let resend: bool = row.try_get("resend").map_err(PublishError::Database)?;
-            let subject =
-                subject_for_event_type(&event_type).ok_or(PublishError::UnknownEventType)?;
-            let (body, event_id) = stored_envelope(&event_type, &payload)?;
-            if body.len() > deliverable_bytes {
-                self.mark_undeliverable(id).await?;
-                continue;
-            }
-            match publish_row(&jetstream, subject, &event_id, body).await {
-                Ok(sequence) => {
-                    if resend {
-                        self.mark_resent(id).await?;
-                    } else {
-                        let mut transaction =
-                            self.pool.begin().await.map_err(PublishError::Database)?;
-                        marks::mark_published(
-                            &mut transaction,
-                            id,
-                            &[i64::try_from(sequence).unwrap_or(i64::MAX)],
-                            self.resend.after,
-                        )
-                        .await?;
-                        transaction.commit().await.map_err(PublishError::Database)?;
-                    }
-                    published += 1;
-                }
-                Err(error) => {
-                    if error.is_closed_connection() {
-                        connection.mark_closed();
-                    }
-                    if resend {
-                        self.record_resend_failure(id).await?;
-                    } else {
-                        self.record_failure(id).await?;
-                    }
-                    first_failure.get_or_insert(error);
-                }
-            }
-        }
-        first_failure.map_or(Ok(published), Err)
+/// A row chosen for this pass, before any lock is taken on it.
+#[derive(Debug)]
+struct Candidate {
+    id: i64,
+    event_type: String,
+    payload: serde_json::Value,
+    /// The archive account the row is bound to.
+    account_id: Option<uuid::Uuid>,
+    /// Whether the row is an already published tombstone that is published again.
+    resend: bool,
+}
+
+impl Candidate {
+    fn read(row: &sqlx::postgres::PgRow) -> Result<Self, PublishError> {
+        use sqlx::Row as _;
+        Ok(Self {
+            id: row.try_get("id").map_err(PublishError::Database)?,
+            event_type: row.try_get("event_type").map_err(PublishError::Database)?,
+            payload: row.try_get("payload").map_err(PublishError::Database)?,
+            account_id: row.try_get("tenant_id").map_err(PublishError::Database)?,
+            resend: row.try_get("resend").map_err(PublishError::Database)?,
+        })
     }
 }

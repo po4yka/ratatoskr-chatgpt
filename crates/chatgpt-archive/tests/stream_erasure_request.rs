@@ -256,6 +256,39 @@ async fn an_unpublished_fact_adds_no_sequence_and_no_command() {
 }
 
 #[tokio::test]
+async fn a_republished_fact_removed_by_the_export_cascade_is_named_by_both_sequences() {
+    let fixture = Fixture::new().await;
+    let received = fixture.import(Some(USER_A), &[("conv-a", "a")]).await;
+    // The head was published twice, the second time after the stream's duplicate window, so the
+    // broker holds two copies under two sequences (XR-021 CONTRACTS.md R6-03 rule 1).
+    sqlx::query(
+        "UPDATE chatgpt_archive.outbox_events
+         SET published_at = now(), published_stream_seqs = ARRAY[3, 9]::bigint[]
+         WHERE id = (SELECT min(id) FROM chatgpt_archive.outbox_events
+                     WHERE event_type = 'ai_archive.archive.imported.v1')",
+    )
+    .execute(fixture.database.pool())
+    .await
+    .expect("the head is marked published twice");
+
+    fixture
+        .delete(
+            received.account,
+            PrivacyDeletionScope::Archive {
+                ai_archive_id: received.archive,
+            },
+        )
+        .await;
+
+    assert_eq!(
+        requested(fixture.database.pool()).await,
+        vec![(owner(USER_A), vec![3, 9])],
+        "one command names both copies of the republished fact"
+    );
+    fixture.database.discard().await;
+}
+
+#[tokio::test]
 async fn more_than_five_hundred_sequences_are_split_into_ascending_commands() {
     let fixture = Fixture::new().await;
     let names: Vec<String> = (0..501).map(|index| format!("conv-{index:03}")).collect();

@@ -8,6 +8,7 @@ pub mod auth;
 pub mod http;
 pub mod outbox;
 pub mod pg;
+pub mod probe;
 pub(crate) mod report;
 pub mod repository;
 pub mod state;
@@ -15,6 +16,7 @@ pub mod state;
 use crate::receipt::state::ImportState;
 
 pub use outbox::{ArchiveEventOutbox, PublishError};
+pub use probe::{PublishPause, PublishProbe};
 pub use repository::{
     PlatformOperation, PublishRequest, PublishedExport, ReceiptRepository, RepositoryError,
     RunRecord,

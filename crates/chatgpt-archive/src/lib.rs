@@ -71,6 +71,7 @@ pub mod privacy_deletion;
 pub mod receipt;
 pub mod reconciliation;
 pub mod reparse;
+mod stream_erasure;
 pub use contract_projection::ProjectionError;
 pub use initial_import::InitialImportWorker;
 pub use owner::OwnerResolver;

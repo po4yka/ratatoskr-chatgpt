@@ -207,7 +207,7 @@ mod tests {
             .expect("no other recorder is installed in this test binary");
         let (admin, pool, name) = disposable().await;
         let published = insert_row(&pool, true).await;
-        let after = Duration::from_secs(60);
+        let after = Duration::from_mins(1);
 
         let mut transaction = pool.begin().await.expect("a transaction");
         let missing = mark_published(&mut transaction, published + 1000, &[7], after).await;

@@ -49,7 +49,10 @@ async fn the_one_sequence(pool: &sqlx::PgPool, event_id: &str) -> i64 {
         .expect("a published row records its stream sequences");
     let sequences = recorded.as_array().expect("the column is an array");
     assert_eq!(sequences.len(), 1, "one acknowledgement, one element");
-    sequences[0].as_i64().expect("a sequence is an integer")
+    sequences
+        .first()
+        .and_then(serde_json::Value::as_i64)
+        .expect("a sequence is an integer")
 }
 
 #[tokio::test]

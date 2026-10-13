@@ -16,7 +16,7 @@ const STREAM_ERASURE_COMMAND: &str = "platform.stream_erasure.requested.v1";
 /// The operation report keeps its per-provider ingress subject; the eight archive
 /// facts publish to `evt.` plus their contract type name. The match is closed on
 /// purpose: a type outside it is a programming error, never a row to skip.
-pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
+pub(super) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
     Some(match event_type {
         "platform.operation.reported.v1" => OPERATION_REPORTED_SUBJECT,
         "ai_archive.archive.imported.v1" => "evt.ai_archive.archive.imported.v1",

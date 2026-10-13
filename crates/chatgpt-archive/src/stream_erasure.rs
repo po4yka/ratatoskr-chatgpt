@@ -81,8 +81,7 @@ pub(crate) async fn enqueue_owner_erasure(
 ) -> Result<(), EnqueueError> {
     let request_ref = EntityRef::new(
         EntityKind::parse("privacy_request").map_err(|_| EnqueueError::Invalid)?,
-        EntityLocalId::parse(&erasure.request_id.to_string())
-            .map_err(|_| EnqueueError::Invalid)?,
+        EntityLocalId::parse(&erasure.request_id.to_string()).map_err(|_| EnqueueError::Invalid)?,
     );
     let producer = ProducerName::parse(PRODUCER).map_err(|_| EnqueueError::Invalid)?;
     let owner_ref = TenantRef::parse(erasure.owner).map_err(|_| EnqueueError::Invalid)?;
