@@ -200,3 +200,28 @@ async fn extractor_cleans_only_its_owned_staging_directory() {
         "per-run staging directories must be removed after publication"
     );
 }
+
+#[tokio::test]
+async fn inspector_refuses_malformed_utf8_filename() {
+    let archive = malformed_utf8_name(zip(&[("entry.json", b"{}")], false));
+    let error = inspect(archive)
+        .await
+        .expect_err("malformed UTF-8 name must be refused");
+    assert!(matches!(error, ArchiveIntakeError::UnsupportedFormat));
+}
+
+fn malformed_utf8_name(mut bytes: Vec<u8>) -> Vec<u8> {
+    for (signature, flags_offset, name_offset) in [(b"PK\x03\x04", 7, 30), (b"PK\x01\x02", 9, 46)] {
+        let header = bytes
+            .windows(4)
+            .position(|window| window == signature)
+            .expect("synthetic ZIP header exists");
+        *bytes
+            .get_mut(header + flags_offset)
+            .expect("flags byte exists") |= 0x08;
+        *bytes
+            .get_mut(header + name_offset)
+            .expect("filename byte exists") = 0xff;
+    }
+    bytes
+}

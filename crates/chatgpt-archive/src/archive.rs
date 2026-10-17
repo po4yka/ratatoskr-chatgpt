@@ -295,7 +295,7 @@ fn inspect_zip(
         let entry = archive
             .by_index(index)
             .map_err(|_| ArchiveIntakeError::UnsupportedFormat)?;
-        let normalized = normalize_path(entry.name())?;
+        let normalized = normalize_path(&decoded_entry_name(&entry)?)?;
         if !names.insert(normalized.clone()) {
             return Err(ArchiveIntakeError::DuplicateName);
         }
@@ -383,7 +383,7 @@ fn extract_entries(
         let mut entry = archive
             .by_index(index)
             .map_err(|_| ArchiveIntakeError::UnsupportedFormat)?;
-        if normalize_path(entry.name())? != observed.path {
+        if normalize_path(&decoded_entry_name(&entry)?)? != observed.path {
             return Err(ArchiveIntakeError::UnsafePath);
         }
 
@@ -434,6 +434,18 @@ fn extract_entries(
         });
     }
     Ok(artifacts)
+}
+
+fn decoded_entry_name<'a>(
+    entry: &'a zip::read::ZipFile<'_, File>,
+) -> Result<std::borrow::Cow<'a, str>, ArchiveIntakeError> {
+    // ZIP bit 11 requires UTF-8; the library can otherwise fall back to CP437.
+    if entry.flags().as_u16() & 0x0800 != 0 {
+        std::str::from_utf8(entry.name_raw()).map_err(|_| ArchiveIntakeError::UnsupportedFormat)?;
+    }
+    entry
+        .name()
+        .map_err(|_| ArchiveIntakeError::UnsupportedFormat)
 }
 
 fn reject_special_file(entry: &zip::read::ZipFile<'_, File>) -> Result<(), ArchiveIntakeError> {
