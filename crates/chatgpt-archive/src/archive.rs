@@ -442,6 +442,17 @@ fn decoded_entry_name<'a>(
     // ZIP bit 11 requires UTF-8; the library can otherwise fall back to CP437.
     if entry.flags().as_u16() & 0x0800 != 0 {
         std::str::from_utf8(entry.name_raw()).map_err(|_| ArchiveIntakeError::UnsupportedFormat)?;
+    } else if !entry.name_raw().is_ascii() {
+        // Unflagged names use CP437, even when their bytes also form valid UTF-8.
+        return Ok(std::borrow::Cow::Owned(
+            entry
+                .name_raw()
+                .iter()
+                .copied()
+                .map(oem_cp::Cp437::from)
+                .map(char::from)
+                .collect(),
+        ));
     }
     entry
         .name()
